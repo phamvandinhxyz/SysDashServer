@@ -21,7 +21,8 @@ func (h *DockerHandler) GetImages(c *gin.Context) {
 	if err := h.dockerCollector.Ping(); err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"available": false,
-			"message":   "Docker daemon is not running or socket is not accessible",
+			"message":   "Docker daemon is not accessible: " + err.Error(),
+			"hint":      "If running inside Docker container, mount '-v /var/run/docker.sock:/var/run/docker.sock:ro'. On host, ensure user has read permission.",
 			"count":     0,
 			"images":    []interface{}{},
 		})
@@ -49,7 +50,8 @@ func (h *DockerHandler) GetContainers(c *gin.Context) {
 	if err := h.dockerCollector.Ping(); err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"available":  false,
-			"message":    "Docker daemon is not running or socket is not accessible",
+			"message":    "Docker daemon is not accessible: " + err.Error(),
+			"hint":       "If running inside Docker container, mount '-v /var/run/docker.sock:/var/run/docker.sock:ro'. On host, ensure user has read permission.",
 			"count":      0,
 			"containers": []interface{}{},
 		})

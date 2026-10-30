@@ -2,6 +2,7 @@ package collector
 
 import (
 	"math"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -204,6 +205,7 @@ func (c *SystemCollector) Collect() models.RealtimeMetric {
 	}
 
 	// 3. Disk Partitions (Filter out pseudo, virtual, snap squashfs and tmpfs mounts)
+	hostRoot := os.Getenv("HOST_ROOT")
 	if partitions, err := disk.Partitions(false); err == nil {
 		var parts []models.PartitionStat
 		seenMounts := make(map[string]bool)
@@ -221,16 +223,41 @@ func (c *SystemCollector) Collect() models.RealtimeMetric {
 				continue
 			}
 
+			displayMount := p.Mountpoint
+			// If mounted as /host or /rootfs or HOST_ROOT, display as "/"
+			if displayMount == "/host" || displayMount == "/rootfs" || (hostRoot != "" && displayMount == hostRoot) {
+				displayMount = "/"
+			}
+
 			seenMounts[p.Mountpoint] = true
 			parts = append(parts, models.PartitionStat{
 				Device:      p.Device,
-				Mountpoint:  p.Mountpoint,
+				Mountpoint:  displayMount,
 				Fstype:      p.Fstype,
 				Total:       usage.Total,
 				Used:        usage.Used,
 				Free:        usage.Free,
 				UsedPercent: math.Round(usage.UsedPercent*100) / 100,
 			})
+		}
+
+		// Fallback: If parts is still empty (e.g. running in minimal container without extra mounts)
+		if len(parts) == 0 {
+			targetMount := "/"
+			if _, err := os.Stat("/host"); err == nil {
+				targetMount = "/host"
+			}
+			if usage, err := disk.Usage(targetMount); err == nil && usage.Total > 0 {
+				parts = append(parts, models.PartitionStat{
+					Device:      "root",
+					Mountpoint:  "/",
+					Fstype:      "ext4",
+					Total:       usage.Total,
+					Used:        usage.Used,
+					Free:        usage.Free,
+					UsedPercent: math.Round(usage.UsedPercent*100) / 100,
+				})
+			}
 		}
 
 		// Sort so Root "/" (Linux) or "C:" (Windows) is ALWAYS the first partition
@@ -296,12 +323,21 @@ func isVirtualFS(fstype, mountpoint string) bool {
 	fs := strings.ToLower(fstype)
 	mount := strings.ToLower(mountpoint)
 
-	// Ignore Linux pseudo filesystems, RAM disks, Docker containers, Snap packages
+	// NEVER ignore root mounts
+	hostRoot := strings.ToLower(os.Getenv("HOST_ROOT"))
+	if mount == "/" || mount == "/host" || mount == "/rootfs" || (hostRoot != "" && mount == hostRoot) {
+		return false
+	}
+
+	// Ignore Linux pseudo filesystems, RAM disks, Snap packages
 	switch fs {
-	case "squashfs", "tmpfs", "devtmpfs", "overlay", "cgroup", "cgroup2",
+	case "squashfs", "tmpfs", "devtmpfs", "cgroup", "cgroup2",
 		"proc", "sysfs", "nsfs", "mqueue", "hugetlbfs", "autofs",
 		"binfmt_misc", "tracefs", "debugfs", "fuse.lxcfs":
 		return true
+	case "overlay":
+		// Inside docker container, root is overlayfs. Never ignore root overlay!
+		return mount != "/" && mount != "/host" && mount != "/rootfs" && (hostRoot == "" || mount != hostRoot)
 	}
 
 	// Ignore common virtual mount paths on Ubuntu

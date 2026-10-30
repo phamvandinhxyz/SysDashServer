@@ -22,6 +22,7 @@ type DockerCollector struct {
 
 func NewDockerCollector() *DockerCollector {
 	dockerHost := os.Getenv("DOCKER_HOST")
+	dockerSocket := os.Getenv("DOCKER_SOCKET")
 	var isUnix bool
 	var client *http.Client
 
@@ -32,11 +33,24 @@ func NewDockerCollector() *DockerCollector {
 		} else {
 			dockerHost = "http://localhost"
 			isUnix = true
+
+			// Detect best unix socket location on Linux / VPS
+			sockPath := "/var/run/docker.sock"
+			if dockerSocket != "" {
+				sockPath = dockerSocket
+			} else if _, err := os.Stat("/run/docker.sock"); err == nil {
+				sockPath = "/run/docker.sock"
+			}
+
 			client = &http.Client{
 				Timeout: 3 * time.Second,
 				Transport: &http.Transport{
 					DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-						return net.Dial("unix", "/var/run/docker.sock")
+						conn, err := net.Dial("unix", sockPath)
+						if err != nil && sockPath != "/var/run/docker.sock" {
+							return net.Dial("unix", "/var/run/docker.sock")
+						}
+						return conn, err
 					},
 				},
 			}
@@ -121,9 +135,13 @@ func (c *DockerCollector) GetImages() ([]models.DockerImageInfo, error) {
 		if strings.HasPrefix(id, "sha256:") && len(id) > 19 {
 			id = id[7:19] // Short ID
 		}
+		tags := img.RepoTags
+		if len(tags) == 0 {
+			tags = []string{"<none>:<none>"}
+		}
 		images = append(images, models.DockerImageInfo{
 			ID:         id,
-			RepoTags:   img.RepoTags,
+			RepoTags:   tags,
 			Size:       img.Size,
 			Created:    img.Created,
 			Containers: img.Containers,

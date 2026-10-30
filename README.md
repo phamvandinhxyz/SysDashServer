@@ -57,6 +57,47 @@ Mọi phản hồi lỗi từ server đều tuân theo cấu trúc JSON thống 
 
 ---
 
+---
+
+## 🐳 3.1. Hướng Dẫn Chạy Docker Trên Linux VPS (Đo Chuẩn 100%)
+
+Khi ứng dụng giám sát chạy bên trong Docker container, mặc định Docker sẽ **cô lập hoàn toàn** tài nguyên (Network bridge ảo, ổ đĩa overlay ảo, PID ảo, không có quyền truy cập socket Docker).
+
+Để ứng dụng đo **chính xác 100% tài nguyên thực tế của VPS**, bắt buộc phải chạy container với các cờ Host Mount sau:
+
+### Cách 1: Sử dụng Docker Compose (Khuyên dùng)
+Dự án đã có sẵn file docker-compose.yml, bạn chỉ cần chạy:
+``bash
+docker compose up -d --build
+``
+
+### Cách 2: Sử dụng lệnh docker run trực tiếp:
+``bash
+docker run -d \
+  --name sysdash-server \
+  --restart unless-stopped \
+  --net=host \
+  --pid=host \
+  -v /var/run/docker.sock:/var/run/docker.sock:ro \
+  -v /proc:/host/proc:ro \
+  -v /sys:/host/sys:ro \
+  -v /:/host:ro \
+  -v E:\JAVA\Android studio\SysDashServer/sysdash.db:/app/sysdash.db \
+  -e HOST_PROC=/host/proc \
+  -e HOST_SYS=/host/sys \
+  -e HOST_ROOT=/host \
+  -e PORT=8095 \
+  sysdash-server
+``
+
+#### 💡 Giải thích các cờ bắt buộc:
+1. **--net=host**: Dùng trực tiếp stack mạng của VPS để đo đúng băng thông Internet Upload/Download thật (thay vì card mạng ảo 172.17.0.x).
+2. **--pid=host**: Dùng bảng tiến trình của VPS để hiển thị danh sách TopProcesses của toàn bộ máy chủ.
+3. **-v /var/run/docker.sock:/var/run/docker.sock:ro**: Cho phép ứng dụng đọc Docker Engine API để lấy danh sách Docker Images & Containers.
+4. **-v /:/host:ro + -e HOST_ROOT=/host**: Mount ổ cứng thực tế của VPS để đo đúng dung lượng Disk (thay vì đo phân vùng overlay ảo của container).
+5. **-v /proc:/host/proc:ro + -e HOST_PROC=/host/proc**: Đọc trực tiếp /proc của VPS để đo chính xác RAM và CPU theo chuẩn htop.
+
+---
 ## 🚀 4. Chi Tiết Danh Sách API (API Endpoints & Examples)
 
 ---
