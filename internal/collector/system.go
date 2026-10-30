@@ -545,11 +545,19 @@ func (c *SystemCollector) Diagnostics() map[string]interface{} {
 	return result
 }
 
-// GetProcesses returns filtered, sorted and paginated process list
+// GetProcesses returns filtered, sorted and paginated process list with normalized CPU (0 - 100%)
 func (c *SystemCollector) GetProcesses(search, sortBy, order string, limit int) []models.ProcessInfo {
 	procs, err := process.Processes()
 	if err != nil {
 		return nil
+	}
+
+	cores := float64(runtime.NumCPU())
+	if count, err := cpu.Counts(true); err == nil && count > 0 {
+		cores = float64(count)
+	}
+	if cores <= 0 {
+		cores = 1.0
 	}
 
 	searchLower := strings.ToLower(strings.TrimSpace(search))
@@ -582,10 +590,14 @@ func (c *SystemCollector) GetProcesses(search, sortBy, order string, limit int) 
 			statusStr = status[0]
 		}
 
+		// Normalize process CPU to 0 - 100% of entire system capacity (Solaris mode)
+		// instead of gopsutil's default Irix mode (where 1 core = 100%, up to N*100%)
+		normalizedCPU := math.Round((cpuPct/cores)*100) / 100
+
 		list = append(list, models.ProcessInfo{
 			PID:           p.Pid,
 			Name:          name,
-			CPUPercent:    math.Round(cpuPct*100) / 100,
+			CPUPercent:    normalizedCPU,
 			MemoryPercent: float32(math.Round(float64(memPct)*100) / 100),
 			MemoryRSS:     rss,
 			Status:        statusStr,

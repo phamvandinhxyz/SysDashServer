@@ -52,13 +52,13 @@ type PartitionStat struct {
 	FreeFormatted  string  `json:"free_formatted"`
 }
 
-// ProcessInfo represents running process details
+// ProcessInfo represents running process details with normalized CPU and RAM
 type ProcessInfo struct {
 	PID           int32   `json:"pid"`
 	Name          string  `json:"name"`
-	CPUPercent    float64 `json:"cpu_percent"`
-	MemoryPercent float32 `json:"memory_percent"`
-	MemoryRSS     uint64  `json:"memory_rss"`
+	CPUPercent    float64 `json:"cpu_percent"`    // Phần trăm CPU chuẩn hóa theo toàn bộ hệ thống (0 - 100%)
+	MemoryPercent float32 `json:"memory_percent"` // Phần trăm RAM so với tổng RAM vật lý (%)
+	MemoryRSS     uint64  `json:"memory_rss"`     // Dung lượng RAM thực tế (Resident Set Size - bytes)
 	Status        string  `json:"status"`
 }
 

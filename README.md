@@ -112,6 +112,7 @@ docker run -d \
 | `partitions[].total/used/free` | `df -B1 /` | `Size / Used / Avail`, `used_percent = Used/(Used+Avail)` |
 | `containers[].mem_usage` | `docker stats --no-stream` | `usage - inactive_file` (cgroup v2) / `usage - total_inactive_file` (v1) |
 | `containers[].cpu_percent` | Chuẩn hóa theo Host (0 - 100%) | `(cpu_delta / system_delta) * 100` (chuẩn hóa theo tổng tài nguyên CPU máy chủ, không nhân `onlineCPUs` như `docker stats` CLI để đồng bộ thang đo với Dashboard) |
+| `top_processes[].cpu_percent` | Chuẩn hóa theo Host (0 - 100%) | `cpu_process / cores` (chuẩn hóa theo toàn bộ công suất CPU máy chủ 0 - 100%, thay vì Irix mode của `top` để đồng bộ với % CPU tổng) |
 | `images[].size` | `docker images` | trường `Size` của Docker Engine API (đơn vị SI) |
 
 #### `GET /system/diagnostics` *(Admin Only)*
@@ -416,7 +417,7 @@ Lấy thống kê Min, Max, Average của các chỉ số trong một khoảng t
 ### ⚙️ 4.4. Quản Lý Tiến Trình (Processes)
 
 #### `GET /system/processes`
-Tìm kiếm, sắp xếp và phân trang các tiến trình hệ thống đang chạy.
+Tìm kiếm, sắp xếp và phân trang các tiến trình hệ thống đang chạy (chỉ số `% CPU` được chuẩn hóa theo toàn bộ hệ thống máy chủ 0 - 100%).
 
 - **Query Parameters**:
   | Param | Kiểu | Mặc định | Mô tả |
