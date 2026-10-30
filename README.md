@@ -6,8 +6,8 @@
 
 ## 📌 1. Thông Tin Chung (General Info)
 
-- **Base URL**: `http://<server-ip>:8080/api/v1`
-- **WebSocket URL**: `ws://<server-ip>:8080/api/v1/ws/metrics`
+- **Base URL**: `http://<server-ip>:8095/api/v1`
+- **WebSocket URL**: `ws://<server-ip>:8095/api/v1/ws/metrics`
 - **Content-Type**: `application/json`
 - **Default Admin Account**:
   - **Username**: `admin`
@@ -27,7 +27,7 @@ Authorization: Bearer <your_jwt_token>
 
 ### URL Query Param (Dành riêng cho WebSocket / Client giới hạn header):
 ```http
-ws://<server-ip>:8080/api/v1/ws/metrics?token=<your_jwt_token>
+ws://<server-ip>:8095/api/v1/ws/metrics?token=<your_jwt_token>
 ```
 
 ### Phân quyền (RBAC Roles):
@@ -437,7 +437,7 @@ Lấy danh sách tất cả Containers (đang chạy hoặc đã dừng).
 #### `WS /ws/metrics?token=<jwt>`
 Kết nối WebSocket để nhận dữ liệu đẩy về liên tục mỗi **2 giây**.
 
-- **URL**: `ws://<server-ip>:8080/api/v1/ws/metrics?token=<jwt>`
+- **URL**: `ws://<server-ip>:8095/api/v1/ws/metrics?token=<jwt>`
 - **Cơ chế**:
   - Gửi dữ liệu snapshot ngay khi vừa bắt tay (handshake) thành công.
   - Tự động đẩy payload `RealtimeMetric` mỗi 2 giây.
@@ -683,7 +683,7 @@ Xóa tài khoản người dùng (Admin không thể tự xóa tài khoản củ
 ```typescript
 import axios from 'axios';
 
-const API_BASE = 'http://localhost:8080/api/v1';
+const API_BASE = 'http://localhost:8095/api/v1';
 let authToken = '';
 
 // Data model cho HostInfo (bao gồm đầy đủ số nhân, luồng, xung nhịp)
@@ -729,7 +729,7 @@ export async function getMetricHistory(range: string = '24h', bucket: string = '
 
 // 4. Kết nối WebSocket thời gian thực
 export function connectRealtimeStream(onData: (metric: any) => void) {
-  const ws = new WebSocket(`ws://localhost:8080/api/v1/ws/metrics?token=${authToken}`);
+  const ws = new WebSocket(`ws://localhost:8095/api/v1/ws/metrics?token=${authToken}`);
 
   ws.onmessage = (event) => {
     const metric = JSON.parse(event.data);
@@ -796,7 +796,7 @@ interface SysDashApi {
 ```kotlin
 val client = OkHttpClient()
 val request = Request.Builder()
-    .url("ws://10.0.2.2:8080/api/v1/ws/metrics?token=$jwtToken")
+    .url("ws://10.0.2.2:8095/api/v1/ws/metrics?token=$jwtToken")
     .build()
 
 val listener = object : WebSocketListener() {

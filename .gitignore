@@ -1,0 +1,27 @@
+# Binaries and executables
+sysdash-server.exe
+sysdash-server
+sysdash-server-linux
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Database files
+sysdash.db
+sysdash.db-journal
+sysdash.db-wal
+sysdash.db-shm
+*.db
+*.sqlite
+
+# Logs & temp files
+*.log
+out.log
+err.log
+scratch/
+
+# IDE and Editor configs
+.idea/
+.vscode/
