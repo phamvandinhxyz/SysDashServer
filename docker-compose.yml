@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  sysdash-server:
+    image: phamvandinh/sysdash-server:v1.0
+    container_name: sysdash_server_app
+    restart: unless-stopped
+    network_mode: host
+    pid: host
+    env_file:
+      - ../../../one-driver/OneDrive/Tài liệu/system-dashboard/system-dashboard/.env
+    ports:
+      - "127.0.0.1:${PORT:-8095}:${PORT:-8095}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Mount proc và sys của máy chủ VPS
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      # Mount ổ đĩa thật của VPS để đo dung lượng Disk (thay vì ổ ảo container)
+      - /:/host:ro
+      # Lưu file database SQLite trên host để không bị mất dữ liệu
+      - ./sysdash.db:/app/sysdash.db
+    environment:
+      - TZ=Asia/Ho_Chi_Minh
+      # Khai báo đường dẫn proc/sys/root để gopsutil đọc tài nguyên từ máy chủ VPS
+      - HOST_PROC=/host/proc
+      - HOST_SYS=/host/sys
+      - HOST_ROOT=/host
+      - DOCKER_HOST=unix:///var/run/docker.sock

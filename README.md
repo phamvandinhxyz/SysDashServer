@@ -399,7 +399,7 @@ Tìm kiếm, sắp xếp và phân trang các tiến trình hệ thống đang c
 ### 🐳 4.5. Docker Monitoring
 
 #### `GET /docker/images`
-Lấy danh sách các Docker Image trên máy chủ. Tự động kiểm tra Docker Daemon (không gây crash nếu chưa bật Docker).
+Lấy danh sách các Docker Image trên máy chủ, bao gồm dung lượng ổ đĩa (Disk Size) và **tổng dung lượng RAM đang tiêu thụ** bởi các container đang chạy từ image này.
 
 - **Headers**: `Authorization: Bearer <token>`
 - **Response `200 OK` (Khi Docker đang chạy)**:
@@ -414,8 +414,12 @@ Lấy danh sách các Docker Image trên máy chủ. Tự động kiểm tra Doc
         "nginx:alpine"
       ],
       "size": 23592960,
+      "size_formatted": "22.50 MB",
       "created": 1729000000,
-      "containers": 1
+      "containers": 1,
+      "running_containers": 1,
+      "mem_usage": 47349760,
+      "mem_formatted": "45.16 MB"
     },
     {
       "id": "8485203fa120",
@@ -423,8 +427,12 @@ Lấy danh sách các Docker Image trên máy chủ. Tự động kiểm tra Doc
         "postgres:16-alpine"
       ],
       "size": 185420000,
+      "size_formatted": "176.83 MB",
       "created": 1728500000,
-      "containers": 2
+      "containers": 1,
+      "running_containers": 1,
+      "mem_usage": 89128960,
+      "mem_formatted": "85.00 MB"
     }
   ]
 }
@@ -443,7 +451,7 @@ Lấy danh sách các Docker Image trên máy chủ. Tự động kiểm tra Doc
 ---
 
 #### `GET /docker/containers`
-Lấy danh sách tất cả Containers (đang chạy hoặc đã dừng).
+Lấy danh sách tất cả Containers (đang chạy hoặc đã dừng) kèm theo **chi tiết RAM thực tế (Used), giới hạn RAM (Limit), % RAM và % CPU** chuẩn theo công thức `docker stats`.
 
 - **Headers**: `Authorization: Bearer <token>`
 - **Response `200 OK`**:
@@ -465,7 +473,12 @@ Lấy danh sách tất cả Containers (đang chạy hoặc đã dừng).
       "status": "Up 3 days",
       "labels": {
         "maintainer": "NGINX Docker Maintainers"
-      }
+      },
+      "mem_usage": 47349760,
+      "mem_limit": 2097152000,
+      "mem_percent": 2.26,
+      "mem_usage_formatted": "45.16 MB / 1.95 GB",
+      "cpu_percent": 0.45
     }
   ]
 }
