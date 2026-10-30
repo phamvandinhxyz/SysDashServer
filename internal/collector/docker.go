@@ -22,59 +22,60 @@ type DockerCollector struct {
 	isUnix bool
 }
 
+// Docker "stats?stream=false" waits for 2 samples (~1-2s), so timeouts must be generous
+const (
+	dockerClientTimeout = 15 * time.Second
+	dockerStatsTimeout  = 8 * time.Second
+	dockerListTimeout   = 5 * time.Second
+)
+
 func NewDockerCollector() *DockerCollector {
 	dockerHost := os.Getenv("DOCKER_HOST")
 	dockerSocket := os.Getenv("DOCKER_SOCKET")
 	var isUnix bool
 	var client *http.Client
 
-	if dockerHost == "" {
-		if runtime.GOOS == "windows" {
-			dockerHost = "http://localhost:2375"
-			client = &http.Client{Timeout: 4 * time.Second}
-		} else {
-			dockerHost = "http://localhost"
-			isUnix = true
-
-			// Detect best unix socket location on Linux / VPS
-			sockPath := "/var/run/docker.sock"
-			if dockerSocket != "" {
-				sockPath = dockerSocket
-			} else if _, err := os.Stat("/run/docker.sock"); err == nil {
-				sockPath = "/run/docker.sock"
-			}
-
-			client = &http.Client{
-				Timeout: 4 * time.Second,
-				Transport: &http.Transport{
-					DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-						conn, err := net.Dial("unix", sockPath)
-						if err != nil && sockPath != "/var/run/docker.sock" {
-							return net.Dial("unix", "/var/run/docker.sock")
-						}
-						return conn, err
-					},
-				},
-			}
-		}
-	} else if strings.HasPrefix(dockerHost, "unix://") {
-		sockPath := strings.TrimPrefix(dockerHost, "unix://")
-		dockerHost = "http://localhost"
-		isUnix = true
-		client = &http.Client{
-			Timeout: 4 * time.Second,
+	unixClient := func(sockPath string, fallback bool) *http.Client {
+		return &http.Client{
+			Timeout: dockerClientTimeout,
 			Transport: &http.Transport{
+				MaxIdleConnsPerHost: 16,
 				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-					return net.Dial("unix", sockPath)
+					var d net.Dialer
+					conn, err := d.DialContext(ctx, "unix", sockPath)
+					if err != nil && fallback && sockPath != "/var/run/docker.sock" {
+						return d.DialContext(ctx, "unix", "/var/run/docker.sock")
+					}
+					return conn, err
 				},
 			},
 		}
-	} else {
-		// TCP host (e.g., tcp://127.0.0.1:2375 -> http://127.0.0.1:2375)
+	}
+
+	switch {
+	case dockerHost == "" && runtime.GOOS == "windows":
+		dockerHost = "http://localhost:2375"
+		client = &http.Client{Timeout: dockerClientTimeout}
+	case dockerHost == "":
+		sockPath := "/var/run/docker.sock"
+		if dockerSocket != "" {
+			sockPath = dockerSocket
+		} else if _, err := os.Stat("/run/docker.sock"); err == nil {
+			sockPath = "/run/docker.sock"
+		}
+		dockerHost = "http://localhost"
+		isUnix = true
+		client = unixClient(sockPath, true)
+	case strings.HasPrefix(dockerHost, "unix://"):
+		sockPath := strings.TrimPrefix(dockerHost, "unix://")
+		dockerHost = "http://localhost"
+		isUnix = true
+		client = unixClient(sockPath, false)
+	default:
 		if strings.HasPrefix(dockerHost, "tcp://") {
 			dockerHost = "http://" + strings.TrimPrefix(dockerHost, "tcp://")
 		}
-		client = &http.Client{Timeout: 4 * time.Second}
+		client = &http.Client{Timeout: dockerClientTimeout}
 	}
 
 	return &DockerCollector{
@@ -84,12 +85,11 @@ func NewDockerCollector() *DockerCollector {
 	}
 }
 
-// Ping checks if Docker daemon is accessible
-func (c *DockerCollector) Ping() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+func (c *DockerCollector) getJSON(timeout time.Duration, path string, out interface{}) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, "GET", c.host+"/_ping", nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", c.host+path, nil)
 	if err != nil {
 		return err
 	}
@@ -100,20 +100,25 @@ func (c *DockerCollector) Ping() error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("docker ping returned status %d", resp.StatusCode)
+		return fmt.Errorf("docker engine returned HTTP %d for %s", resp.StatusCode, path)
 	}
-	return nil
+	if out == nil {
+		return nil
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+// Ping checks if Docker daemon is accessible
+func (c *DockerCollector) Ping() error {
+	return c.getJSON(3*time.Second, "/_ping", nil)
 }
 
 // Raw struct for decoding Docker Engine /containers/{id}/stats?stream=false
 type dockerContainerStatsRaw struct {
 	MemoryStats struct {
-		Usage uint64 `json:"usage"`
-		Limit uint64 `json:"limit"`
-		Stats struct {
-			Cache        uint64 `json:"cache"`
-			InactiveFile uint64 `json:"inactive_file"`
-		} `json:"stats"`
+		Usage uint64            `json:"usage"`
+		Limit uint64            `json:"limit"`
+		Stats map[string]uint64 `json:"stats"`
 	} `json:"memory_stats"`
 	CPUStats struct {
 		CPUUsage struct {
@@ -131,101 +136,54 @@ type dockerContainerStatsRaw struct {
 	} `json:"precpu_stats"`
 }
 
-// getContainerStats queries real-time RAM and CPU metrics matching docker stats
-func (c *DockerCollector) getContainerStats(containerID string) (memUsage, memLimit uint64, memPct, cpuPct float64) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+type containerStats struct {
+	memUsage uint64
+	memLimit uint64
+	memPct   float64
+	cpuPct   float64
+	err      error
+}
 
-	url := fmt.Sprintf("%s/containers/%s/stats?stream=false", c.host, containerID)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return 0, 0, 0, 0
-	}
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return 0, 0, 0, 0
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return 0, 0, 0, 0
-	}
-
+// getContainerStats returns RAM & CPU using EXACTLY the same formulas as the Docker CLI (`docker stats`)
+func (c *DockerCollector) getContainerStats(containerID string) containerStats {
 	var raw dockerContainerStatsRaw
-	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
-		return 0, 0, 0, 0
+	if err := c.getJSON(dockerStatsTimeout, "/containers/"+containerID+"/stats?stream=false", &raw); err != nil {
+		return containerStats{err: err}
 	}
 
-	// 1. RAM Calculation matching `docker stats` exactly (cgroup v1 & cgroup v2)
-	cache := raw.MemoryStats.Stats.InactiveFile
-	if cache == 0 {
-		cache = raw.MemoryStats.Stats.Cache
-	}
+	var s containerStats
+
+	// RAM — docker/cli calculateMemUsageUnixNoCache():
+	//   cgroup v1: usage - total_inactive_file
+	//   cgroup v2: usage - inactive_file
 	usage := raw.MemoryStats.Usage
-	if usage > cache {
-		memUsage = usage - cache
-	} else {
-		memUsage = usage
+	s.memUsage = usage
+	if v, ok := raw.MemoryStats.Stats["total_inactive_file"]; ok && v < usage {
+		s.memUsage = usage - v
+	} else if v, ok := raw.MemoryStats.Stats["inactive_file"]; ok && v < usage {
+		s.memUsage = usage - v
 	}
 
-	memLimit = raw.MemoryStats.Limit
-	if memLimit > 0 {
-		memPct = math.Round((float64(memUsage)/float64(memLimit))*10000) / 100
+	s.memLimit = raw.MemoryStats.Limit
+	if s.memLimit > 0 {
+		s.memPct = math.Round(float64(s.memUsage)/float64(s.memLimit)*10000) / 100
 	}
 
-	// 2. CPU Calculation matching `docker stats`
+	// CPU — docker/cli calculateCPUPercentUnix()
 	cpuDelta := float64(raw.CPUStats.CPUUsage.TotalUsage) - float64(raw.PreCPUStats.CPUUsage.TotalUsage)
 	systemDelta := float64(raw.CPUStats.SystemCPUUsage) - float64(raw.PreCPUStats.SystemCPUUsage)
 	onlineCPUs := float64(raw.CPUStats.OnlineCPUs)
 	if onlineCPUs == 0 {
 		onlineCPUs = float64(len(raw.CPUStats.CPUUsage.PercpuUsage))
 	}
-	if onlineCPUs == 0 {
-		onlineCPUs = 1.0
+	if systemDelta > 0 && cpuDelta > 0 && onlineCPUs > 0 {
+		s.cpuPct = math.Round(cpuDelta/systemDelta*onlineCPUs*100*100) / 100
 	}
-
-	if systemDelta > 0 && cpuDelta > 0 {
-		cpuPct = math.Round(((cpuDelta/systemDelta)*onlineCPUs*100.0)*100) / 100
-	}
-
-	return memUsage, memLimit, memPct, cpuPct
+	return s
 }
 
-// FormatBytes formats byte counts into human-readable strings (e.g. 52.4 MB, 1.95 GB)
-func FormatBytes(b uint64) string {
-	const unit = 1024
-	if b < unit {
-		return fmt.Sprintf("%d B", b)
-	}
-	div, exp := uint64(unit), 0
-	for n := b / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.2f %cB", float64(b)/float64(div), "KMGTPE"[exp])
-}
-
-// GetContainers fetches docker containers along with their active RAM & CPU usage
+// GetContainers fetches docker containers along with their live RAM & CPU usage
 func (c *DockerCollector) GetContainers() ([]models.DockerContainerInfo, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, "GET", c.host+"/containers/json?all=true", nil)
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("docker engine returned HTTP %d", resp.StatusCode)
-	}
-
 	var raw []struct {
 		ID      string            `json:"Id"`
 		Names   []string          `json:"Names"`
@@ -237,37 +195,29 @@ func (c *DockerCollector) GetContainers() ([]models.DockerContainerInfo, error) 
 		Status  string            `json:"Status"`
 		Labels  map[string]string `json:"Labels"`
 	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+	if err := c.getJSON(dockerListTimeout, "/containers/json?all=true", &raw); err != nil {
 		return nil, err
 	}
 
 	containers := make([]models.DockerContainerInfo, len(raw))
-
-	type statResult struct {
-		index    int
-		memUsage uint64
-		memLimit uint64
-		memPct   float64
-		cpuPct   float64
-	}
+	stats := make([]containerStats, len(raw))
 
 	var wg sync.WaitGroup
-	statChan := make(chan statResult, len(raw))
+	sem := make(chan struct{}, 8) // limit concurrent stats calls
 
 	for i, item := range raw {
 		id := item.ID
 		if len(id) > 12 {
 			id = id[:12]
 		}
-		var cleanNames []string
-		for _, name := range item.Names {
-			cleanNames = append(cleanNames, strings.TrimPrefix(name, "/"))
+		names := make([]string, 0, len(item.Names))
+		for _, n := range item.Names {
+			names = append(names, strings.TrimPrefix(n, "/"))
 		}
 
 		containers[i] = models.DockerContainerInfo{
 			ID:                id,
-			Names:             cleanNames,
+			Names:             names,
 			Image:             item.Image,
 			ImageID:           item.ImageID,
 			Command:           item.Command,
@@ -278,142 +228,120 @@ func (c *DockerCollector) GetContainers() ([]models.DockerContainerInfo, error) 
 			MemUsageFormatted: "0 B",
 		}
 
-		// Query real-time stats concurrently for running containers
 		if strings.EqualFold(item.State, "running") {
 			wg.Add(1)
-			go func(idx int, containerFullID string) {
+			go func(idx int, fullID string) {
 				defer wg.Done()
-				mu, ml, mp, cp := c.getContainerStats(containerFullID)
-				statChan <- statResult{
-					index:    idx,
-					memUsage: mu,
-					memLimit: ml,
-					memPct:   mp,
-					cpuPct:   cp,
-				}
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				stats[idx] = c.getContainerStats(fullID)
 			}(i, item.ID)
 		}
 	}
-
 	wg.Wait()
-	close(statChan)
 
-	for res := range statChan {
-		containers[res.index].MemUsage = res.memUsage
-		containers[res.index].MemLimit = res.memLimit
-		containers[res.index].MemPercent = res.memPct
-		containers[res.index].CPUPercent = res.cpuPct
-		if res.memLimit > 0 {
-			containers[res.index].MemUsageFormatted = fmt.Sprintf("%s / %s",
-				FormatBytes(res.memUsage),
-				FormatBytes(res.memLimit),
-			)
+	for i := range containers {
+		s := stats[i]
+		if s.err != nil || !strings.EqualFold(containers[i].State, "running") {
+			continue
+		}
+		containers[i].MemUsage = s.memUsage
+		containers[i].MemLimit = s.memLimit
+		containers[i].MemPercent = s.memPct
+		containers[i].CPUPercent = s.cpuPct
+		// `docker stats` shows memory in 1024-based units (MiB / GiB)
+		if s.memLimit > 0 {
+			containers[i].MemUsageFormatted = FormatBinary(s.memUsage) + " / " + FormatBinary(s.memLimit)
 		} else {
-			containers[res.index].MemUsageFormatted = FormatBytes(res.memUsage)
+			containers[i].MemUsageFormatted = FormatBinary(s.memUsage)
 		}
 	}
 
 	return containers, nil
 }
 
-// GetImages fetches docker images with disk size and aggregate RAM consumed by its containers
+// GetImages fetches docker images with disk size and aggregated live RAM of containers using them
 func (c *DockerCollector) GetImages() ([]models.DockerImageInfo, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, "GET", c.host+"/images/json", nil)
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("docker engine returned HTTP %d", resp.StatusCode)
-	}
-
 	var raw []struct {
-		ID         string   `json:"Id"`
-		RepoTags   []string `json:"RepoTags"`
-		Size       int64    `json:"Size"`
-		Created    int64    `json:"Created"`
-		Containers int64    `json:"Containers"`
+		ID       string   `json:"Id"`
+		RepoTags []string `json:"RepoTags"`
+		Size     int64    `json:"Size"`
+		Created  int64    `json:"Created"`
 	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+	if err := c.getJSON(dockerListTimeout, "/images/json", &raw); err != nil {
 		return nil, err
 	}
 
-	// Fetch containers to map RAM usage and running count to images
+	// NOTE: the "Containers" field of /images/json is -1 (not calculated) by default,
+	// so we compute container counts & RAM ourselves from the container list.
 	containers, _ := c.GetContainers()
-	imageMemMap := make(map[string]uint64)
-	imageRunningMap := make(map[string]int)
+
+	type agg struct {
+		total   int64
+		running int
+		mem     uint64
+	}
+	byImageID := make(map[string]*agg)
+	byRef := make(map[string]*agg) // fallback by image reference (e.g. "nginx:alpine")
+	get := func(m map[string]*agg, k string) *agg {
+		if m[k] == nil {
+			m[k] = &agg{}
+		}
+		return m[k]
+	}
 
 	for _, ct := range containers {
+		var a *agg
+		if ct.ImageID != "" {
+			a = get(byImageID, ct.ImageID)
+		} else {
+			a = get(byRef, ct.Image)
+		}
+		a.total++
 		if strings.EqualFold(ct.State, "running") {
-			// Map by ImageID
-			imageMemMap[ct.ImageID] += ct.MemUsage
-			imageRunningMap[ct.ImageID]++
-
-			// Also map by short ImageID
-			shortImgID := ct.ImageID
-			if strings.HasPrefix(shortImgID, "sha256:") && len(shortImgID) > 19 {
-				shortImgID = shortImgID[7:19]
-			}
-			imageMemMap[shortImgID] += ct.MemUsage
-			imageRunningMap[shortImgID]++
-
-			// Also map by image tag name (e.g. "nginx:alpine")
-			imageMemMap[ct.Image] += ct.MemUsage
-			imageRunningMap[ct.Image]++
+			a.running++
+			a.mem += ct.MemUsage
 		}
 	}
 
-	var images []models.DockerImageInfo
+	images := make([]models.DockerImageInfo, 0, len(raw))
 	for _, img := range raw {
-		fullID := img.ID
-		shortID := fullID
-		if strings.HasPrefix(shortID, "sha256:") && len(shortID) > 19 {
-			shortID = shortID[7:19]
+		shortID := strings.TrimPrefix(img.ID, "sha256:")
+		if len(shortID) > 12 {
+			shortID = shortID[:12]
 		}
 		tags := img.RepoTags
 		if len(tags) == 0 {
 			tags = []string{"<none>:<none>"}
 		}
 
-		// Find aggregated RAM
-		var ramUsage uint64
-		var runningCount int
-		if val, exists := imageMemMap[fullID]; exists {
-			ramUsage = val
-			runningCount = imageRunningMap[fullID]
-		} else if val, exists := imageMemMap[shortID]; exists {
-			ramUsage = val
-			runningCount = imageRunningMap[shortID]
-		} else {
+		a := byImageID[img.ID]
+		if a == nil {
 			for _, t := range tags {
-				if val, exists := imageMemMap[t]; exists {
-					ramUsage = val
-					runningCount = imageRunningMap[t]
+				if a = byRef[t]; a != nil {
 					break
 				}
 			}
+		}
+		if a == nil {
+			a = &agg{}
+		}
+
+		size := uint64(0)
+		if img.Size > 0 {
+			size = uint64(img.Size)
 		}
 
 		images = append(images, models.DockerImageInfo{
 			ID:                shortID,
 			RepoTags:          tags,
 			Size:              img.Size,
-			SizeFormatted:     FormatBytes(uint64(img.Size)),
+			SizeFormatted:     FormatDecimal(size), // same units as `docker images` (SI: MB/GB)
 			Created:           img.Created,
-			Containers:        img.Containers,
-			RunningContainers: runningCount,
-			MemUsage:          ramUsage,
-			MemFormatted:      FormatBytes(ramUsage),
+			Containers:        a.total,
+			RunningContainers: a.running,
+			MemUsage:          a.mem,
+			MemFormatted:      FormatBinary(a.mem), // same units as `docker stats` (MiB/GiB)
 		})
 	}
 

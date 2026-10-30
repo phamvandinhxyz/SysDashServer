@@ -56,15 +56,15 @@ func SetupRouter(
 		api.GET("/system/info", metricsHandler.GetHostInfo)
 		api.GET("/system/processes", metricsHandler.GetProcesses) // Process search, sort & limit
 		api.GET("/metrics/current", metricsHandler.GetCurrent)
-		api.GET("/metrics/history", metricsHandler.GetHistory)   // Filter by range, bucket, from, to
-		api.GET("/metrics/summary", metricsHandler.GetSummary)   // Statistical summary (Min, Max, Avg)
+		api.GET("/metrics/history", metricsHandler.GetHistory) // Filter by range, bucket, from, to
+		api.GET("/metrics/summary", metricsHandler.GetSummary) // Statistical summary (Min, Max, Avg)
 
 		// Docker (Viewer & Admin)
 		api.GET("/docker/images", dockerHandler.GetImages)         // List Docker Images
 		api.GET("/docker/containers", dockerHandler.GetContainers) // List Docker Containers
 
 		// Alerts viewing (Viewer & Admin)
-		api.GET("/alerts", alertHandler.ListAlerts)              // Filter by type, level, range & pagination
+		api.GET("/alerts", alertHandler.ListAlerts) // Filter by type, level, range & pagination
 		api.GET("/alerts/config", alertHandler.GetThreshold)
 
 		// Realtime WebSocket stream (Viewer & Admin)
@@ -83,6 +83,9 @@ func SetupRouter(
 
 			// Alert thresholds configuration
 			adminOnly.PUT("/alerts/config", alertHandler.UpdateThreshold)
+
+			// Raw diagnostics to compare with free -b / df -B1 / htop
+			adminOnly.GET("/system/diagnostics", metricsHandler.GetDiagnostics)
 		}
 	}
 

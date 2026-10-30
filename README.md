@@ -98,6 +98,39 @@ docker run -d \
 5. **-v /proc:/host/proc:ro + -e HOST_PROC=/host/proc**: Đọc trực tiếp /proc của VPS để đo chính xác RAM và CPU theo chuẩn htop.
 
 ---
+### 🩺 3.2. Đối chiếu số liệu với `htop` / `free` / `df` / `docker` (Diagnostics)
+
+> [!IMPORTANT]
+> `Dockerfile` build bằng `git clone` từ GitHub và `docker-compose.yml` dùng image `phamvandinh/sysdash-server:v1.0`. Mọi sửa đổi local **chỉ có hiệu lực trên VPS sau khi**: `git push` → build lại image (`--no-cache` hoặc đổi `CACHE_BUST`) → push image → `docker compose pull && docker compose up -d`.
+
+**Đơn vị:** API trả về **bytes**. `htop`, `free -h`, `df -h`, `docker stats` dùng hệ **1024** (GiB/MiB); `docker images` dùng hệ **1000** (GB/MB). Frontend nên dùng sẵn các trường `*_formatted` hoặc chia cho `1024`, **không chia cho `1000`** (nếu không số sẽ lớn hơn htop ~7%).
+
+| Chỉ số API | Lệnh đối chiếu trên VPS | Công thức |
+|---|---|---|
+| `mem_used` | `free -b` (cột `used`) | `MemTotal - MemFree - Buffers - Cached - SReclaimable` |
+| `mem_available` / `mem_buff_cache` | `free -b` (cột `available` / `buff/cache`) | lấy từ `/proc/meminfo` |
+| `partitions[].total/used/free` | `df -B1 /` | `Size / Used / Avail`, `used_percent = Used/(Used+Avail)` |
+| `containers[].mem_usage` | `docker stats --no-stream` | `usage - inactive_file` (cgroup v2) / `usage - total_inactive_file` (v1) |
+| `images[].size` | `docker images` | trường `Size` của Docker Engine API (đơn vị SI) |
+
+#### `GET /system/diagnostics` *(Admin Only)*
+Trả về giá trị thô của `/proc/meminfo`, biến môi trường `HOST_*`, việc có đọc được mount table của host hay không, và **lý do chấp nhận/bỏ qua từng mount** khi tính Disk.
+
+```json
+{
+  "running_in_docker": true,
+  "host_root": "/host",
+  "host_mountinfo_readable": "yes",
+  "meminfo_raw_bytes": { "MemTotal": 4108169216, "MemFree": 312000512, "Buffers": 98000896, "Cached": 1650003968, "SReclaimable": 160002048 },
+  "memory_computed": { "total": 4108169216, "used_like_free_htop": 1888161792, "used_formatted": "1.76 GiB", "total_formatted": "3.83 GiB" },
+  "partitions_scan": [
+    { "device": "/dev/vda1", "mountpoint": "/", "stat_path": "/host", "display": "/", "decision": "accept" },
+    { "device": "overlay", "mountpoint": "/var/lib/docker/overlay2/.../merged", "decision": "skip: virtual/pseudo filesystem" }
+  ]
+}
+```
+
+---
 ## 🚀 4. Chi Tiết Danh Sách API (API Endpoints & Examples)
 
 ---
@@ -208,51 +241,55 @@ Lấy thông tin cấu hình phần cứng tĩnh (Tên chip CPU, Số nhân vậ
 ---
 
 #### `GET /metrics/current`
-Lấy ảnh chụp số liệu phần cứng tức thời (chứa `host_info`, CPU %, % từng nhân, RAM, Swap, Đĩa cứng, Mạng, Top 5 Processes).
+Lấy ảnh chụp số liệu phần cứng tức thời (chứa `host_info`, CPU %, % từng nhân, RAM, Swap, Đĩa cứng, Mạng, Top 5 Processes) với đầy đủ cả giá trị thô (**bytes**) và chuỗi định dạng sẵn (**1024-based formatted strings** khớp với `htop`, `free -h`, `df -h`).
 
 - **Headers**: `Authorization: Bearer <token>`
 - **Response `200 OK`**:
 ```json
 {
-  "timestamp": "2026-10-30T20:30:00.123456Z",
+  "timestamp": "2026-10-31T03:00:00.123456Z",
   "host_info": {
-    "hostname": "DINH-PHAM",
-    "os": "windows",
-    "cpu_model": "Intel(R) Core(TM) i7-14700K",
-    "cpu_physical_cores": 20,
-    "cpu_logical_cores": 28,
-    "cpu_cores": 28,
-    "cpu_mhz": 3400.0,
-    "cpu_speed_ghz": 3.4,
-    "uptime": 15831
+    "hostname": "ubuntu-vps",
+    "os": "linux",
+    "platform": "ubuntu",
+    "platform_family": "debian",
+    "platform_version": "22.04",
+    "kernel_version": "5.15.0-105-generic",
+    "kernel_arch": "x86_64",
+    "uptime": 158310,
+    "boot_time": 1793357861,
+    "cpu_model": "Intel(R) Xeon(R) Gold 6148 CPU @ 2.40GHz",
+    "cpu_physical_cores": 2,
+    "cpu_logical_cores": 4,
+    "cpu_cores": 4,
+    "cpu_mhz": 2400.0,
+    "cpu_speed_ghz": 2.4
   },
   "cpu_percent": 14.85,
-  "cpu_cores_percent": [12.5, 8.3, 25.0, 10.1, 4.2, 16.7],
-  "mem_total": 34185805824,
-  "mem_used": 25639354368,
-  "mem_free": 8546451456,
-  "mem_used_percent": 75.0,
-  "swap_total": 4294967296,
-  "swap_used": 1073741824,
+  "cpu_cores_percent": [12.5, 8.3, 25.0, 10.1],
+  "mem_total": 4108169216,
+  "mem_used": 1888161792,
+  "mem_free": 2220007424,
+  "mem_available": 2220007424,
+  "mem_buff_cache": 1748004864,
+  "mem_used_percent": 45.96,
+  "mem_total_formatted": "3.83 GiB",
+  "mem_used_formatted": "1.76 GiB",
+  "swap_total": 2147483648,
+  "swap_used": 536870912,
   "swap_percent": 25.0,
   "partitions": [
     {
-      "device": "C:",
-      "mountpoint": "C:",
-      "fstype": "NTFS",
-      "total": 511000000000,
-      "used": 285000000000,
-      "free": 226000000000,
-      "used_percent": 55.77
-    },
-    {
-      "device": "E:",
-      "mountpoint": "E:",
-      "fstype": "NTFS",
-      "total": 1000000000000,
-      "used": 420000000000,
-      "free": 580000000000,
-      "used_percent": 42.0
+      "device": "/dev/vda1",
+      "mountpoint": "/",
+      "fstype": "ext4",
+      "total": 83057483776,
+      "used": 30582882304,
+      "free": 52474601472,
+      "used_percent": 36.82,
+      "total_formatted": "77.35 GiB",
+      "used_formatted": "28.48 GiB",
+      "free_formatted": "48.87 GiB"
     }
   ],
   "net_bytes_sent": 1450239044,
@@ -262,23 +299,45 @@ Lấy ảnh chụp số liệu phần cứng tức thời (chứa `host_info`, C
   "top_processes": [
     {
       "pid": 28224,
-      "name": "goland64.exe",
-      "cpu_percent": 24.5,
-      "memory_percent": 11.2,
-      "memory_rss": 3824000000,
+      "name": "sysdash-server",
+      "cpu_percent": 0.85,
+      "memory_percent": 1.12,
+      "memory_rss": 45900000,
       "status": "running"
     },
     {
-      "pid": 16984,
-      "name": "chrome.exe",
-      "cpu_percent": 8.1,
-      "memory_percent": 3.4,
-      "memory_rss": 1162000000,
+      "pid": 1698,
+      "name": "dockerd",
+      "cpu_percent": 0.40,
+      "memory_percent": 2.14,
+      "memory_rss": 87800000,
       "status": "running"
     }
   ]
 }
 ```
+
+##### 📋 Bảng giải thích chi tiết các trường (`RealtimeMetric` & `PartitionStat`):
+| Trường JSON | Kiểu dữ liệu | Đơn vị | Ý nghĩa & Lệnh đối chiếu trên VPS |
+|---|---|---|---|
+| `mem_total` | uint64 | bytes | Tổng RAM vật lý (`MemTotal` trong `free -b` / `/proc/meminfo`) |
+| `mem_used` | uint64 | bytes | RAM thực sự hệ thống & ứng dụng đang dùng (cột `used` của `free -b`, khớp thanh xanh của `htop`) |
+| `mem_free` | uint64 | bytes | RAM chưa phân bổ (`mem_total - mem_used`) |
+| `mem_available` | uint64 | bytes | RAM khả dụng có thể cấp phát mà không cần swap (cột `available` của `free -b`) |
+| `mem_buff_cache` | uint64 | bytes | Bộ đệm kernel và đĩa đệm (cột `buff/cache` của `free -b`) |
+| `mem_used_percent` | float64 | % | Tỷ lệ phần trăm RAM sử dụng (`mem_used / mem_total * 100`) |
+| `mem_total_formatted` | string | Chuỗi GiB | Tổng RAM định dạng hệ 1024 (VD: `3.83 GiB` khớp `htop`) |
+| `mem_used_formatted` | string | Chuỗi GiB | RAM sử dụng định dạng hệ 1024 (VD: `1.76 GiB` khớp `htop`) |
+| `partitions[].device` | string | - | Tên phân vùng thiết bị (VD: `/dev/vda1`, `C:`) |
+| `partitions[].mountpoint` | string | - | Điểm gắn ổ đĩa (`/`, `/boot`, `E:`) |
+| `partitions[].fstype` | string | - | Định dạng hệ thống tệp (`ext4`, `xfs`, `NTFS`) |
+| `partitions[].total` | uint64 | bytes | Dung lượng phân vùng (cột `1B-blocks` của `df -B1`) |
+| `partitions[].used` | uint64 | bytes | Dung lượng đã dùng (cột `Used` của `df -B1`) |
+| `partitions[].free` | uint64 | bytes | Dung lượng trống cho người dùng (cột `Available` của `df -B1`) |
+| `partitions[].used_percent` | float64 | % | Tỷ lệ sử dụng (cột `Use%` của `df -h`: `used / (used + free) * 100`) |
+| `partitions[].total_formatted` | string | Chuỗi GiB | Tổng dung lượng định dạng 1024-based (VD: `77.35 GiB` khớp `df -h`) |
+| `partitions[].used_formatted` | string | Chuỗi GiB | Dung lượng dùng định dạng 1024-based (VD: `28.48 GiB` khớp `df -h`) |
+| `partitions[].free_formatted` | string | Chuỗi GiB | Dung lượng trống định dạng 1024-based (VD: `48.87 GiB` khớp `df -h`) |
 
 ---
 
@@ -498,33 +557,61 @@ Kết nối WebSocket để nhận dữ liệu đẩy về liên tục mỗi **2
 - **Message Payload nhận được (JSON)**:
 ```json
 {
-  "timestamp": "2026-10-30T20:30:02Z",
+  "timestamp": "2026-10-31T03:00:02Z",
   "host_info": {
-    "hostname": "DINH-PHAM",
-    "os": "windows",
-    "cpu_model": "Intel(R) Core(TM) i7-14700K",
-    "cpu_physical_cores": 20,
-    "cpu_logical_cores": 28,
-    "cpu_cores": 28,
-    "cpu_mhz": 3400.0,
-    "cpu_speed_ghz": 3.4,
-    "uptime": 15831
+    "hostname": "ubuntu-vps",
+    "os": "linux",
+    "platform": "ubuntu",
+    "platform_version": "22.04",
+    "cpu_model": "Intel(R) Xeon(R) Gold 6148 CPU @ 2.40GHz",
+    "cpu_physical_cores": 2,
+    "cpu_logical_cores": 4,
+    "cpu_cores": 4,
+    "cpu_mhz": 2400.0,
+    "cpu_speed_ghz": 2.4,
+    "uptime": 158310
   },
-  "cpu_percent": 15.2,
+  "cpu_percent": 15.20,
   "cpu_cores_percent": [12.0, 14.5, 8.0, 22.1],
-  "mem_total": 34185805824,
-  "mem_used": 25639354368,
-  "mem_free": 8546451456,
-  "mem_used_percent": 75.0,
-  "swap_total": 4294967296,
-  "swap_used": 1073741824,
+  "mem_total": 4108169216,
+  "mem_used": 1888161792,
+  "mem_free": 2220007424,
+  "mem_available": 2220007424,
+  "mem_buff_cache": 1748004864,
+  "mem_used_percent": 45.96,
+  "mem_total_formatted": "3.83 GiB",
+  "mem_used_formatted": "1.76 GiB",
+  "swap_total": 2147483648,
+  "swap_used": 536870912,
   "swap_percent": 25.0,
-  "partitions": [ ... ],
+  "partitions": [
+    {
+      "device": "/dev/vda1",
+      "mountpoint": "/",
+      "fstype": "ext4",
+      "total": 83057483776,
+      "used": 30582882304,
+      "free": 52474601472,
+      "used_percent": 36.82,
+      "total_formatted": "77.35 GiB",
+      "used_formatted": "28.48 GiB",
+      "free_formatted": "48.87 GiB"
+    }
+  ],
   "net_bytes_sent": 1450250000,
   "net_bytes_recv": 9823500000,
   "net_upload_rate": 5500.0,
   "net_download_rate": 7500.0,
-  "top_processes": [ ... ]
+  "top_processes": [
+    {
+      "pid": 28224,
+      "name": "sysdash-server",
+      "cpu_percent": 0.85,
+      "memory_percent": 1.12,
+      "memory_rss": 45900000,
+      "status": "running"
+    }
+  ]
 }
 ```
 
@@ -740,23 +827,75 @@ import axios from 'axios';
 const API_BASE = 'http://localhost:8095/api/v1';
 let authToken = '';
 
-// Data model cho HostInfo (bao gồm đầy đủ số nhân, luồng, xung nhịp)
+// 1. Static Host & Hardware Info
 export interface HostInfo {
   hostname: string;
   os: string;
   platform: string;
+  platform_family: string;
   platform_version: string;
   kernel_version: string;
-  cpu_model: string;
-  cpu_physical_cores: number; // Số nhân vật lý (VD: 20)
-  cpu_logical_cores: number;  // Số luồng logic (VD: 28)
-  cpu_cores: number;
-  cpu_mhz: number;            // Tốc độ MHz (VD: 3400.0)
-  cpu_speed_ghz: number;      // Tốc độ GHz (VD: 3.4)
+  kernel_arch: string;
   uptime: number;
+  boot_time: number;
+  cpu_model: string;
+  cpu_physical_cores: number; // Số nhân vật lý (VD: 2)
+  cpu_logical_cores: number;  // Số luồng logic (VD: 4)
+  cpu_cores: number;
+  cpu_mhz: number;            // Xung nhịp MHz (VD: 2400.0)
+  cpu_speed_ghz: number;      // Xung nhịp GHz (VD: 2.40)
 }
 
-// 1. Đăng nhập
+// 2. Disk Partition Info (chuẩn df -h & df -B1)
+export interface PartitionStat {
+  device: string;
+  mountpoint: string;
+  fstype: string;
+  total: number;           // bytes
+  used: number;            // bytes
+  free: number;            // bytes
+  used_percent: number;    // %
+  total_formatted: string; // "77.35 GiB"
+  used_formatted: string;  // "28.48 GiB"
+  free_formatted: string;  // "48.87 GiB"
+}
+
+// 3. Process Info
+export interface ProcessInfo {
+  pid: number;
+  name: string;
+  cpu_percent: number;
+  memory_percent: number;
+  memory_rss: number;
+  status: string;
+}
+
+// 4. Real-time Metric Full Payload (khớp 100% internal/models/metric.go)
+export interface RealtimeMetric {
+  timestamp: string;
+  host_info: HostInfo;
+  cpu_percent: number;
+  cpu_cores_percent: number[];
+  mem_total: number;           // bytes (MemTotal)
+  mem_used: number;            // bytes (used giống htop & free -b)
+  mem_free: number;            // bytes
+  mem_available: number;       // bytes (available)
+  mem_buff_cache: number;      // bytes (buff/cache)
+  mem_used_percent: number;
+  mem_total_formatted: string; // "3.83 GiB" (hiển thị trực tiếp UI)
+  mem_used_formatted: string;  // "1.76 GiB"
+  swap_total: number;
+  swap_used: number;
+  swap_percent: number;
+  partitions: PartitionStat[];
+  net_bytes_sent: number;
+  net_bytes_recv: number;
+  net_upload_rate: number;
+  net_download_rate: number;
+  top_processes: ProcessInfo[];
+}
+
+// 5. Đăng nhập
 export async function login(username: string, password: string) {
   const res = await axios.post(`${API_BASE}/auth/login`, { username, password });
   authToken = res.data.token;
@@ -764,35 +903,25 @@ export async function login(username: string, password: string) {
   return res.data;
 }
 
-// 2. Lấy thông tin cấu hình CPU & Hệ điều hành
-export async function getSystemInfo(): Promise<HostInfo> {
-  const res = await axios.get(`${API_BASE}/system/info`, {
+// 6. Lấy dữ liệu Realtime Snapshot
+export async function getCurrentMetrics(): Promise<RealtimeMetric> {
+  const res = await axios.get(`${API_BASE}/metrics/current`, {
     headers: { Authorization: `Bearer ${authToken}` }
   });
   return res.data;
 }
 
-// 3. Lấy dữ liệu lịch sử vẽ biểu đồ (Chart.js / ECharts / Recharts)
-export async function getMetricHistory(range: string = '24h', bucket: string = '15m') {
-  const res = await axios.get(`${API_BASE}/metrics/history`, {
-    headers: { Authorization: `Bearer ${authToken}` },
-    params: { range, bucket }
-  });
-  return res.data.metrics;
-}
-
-// 4. Kết nối WebSocket thời gian thực
-export function connectRealtimeStream(onData: (metric: any) => void) {
+// 7. Kết nối WebSocket thời gian thực (nhận RealtimeMetric mỗi 2s)
+export function connectRealtimeStream(onData: (metric: RealtimeMetric) => void) {
   const ws = new WebSocket(`ws://localhost:8095/api/v1/ws/metrics?token=${authToken}`);
 
   ws.onmessage = (event) => {
-    const metric = JSON.parse(event.data);
+    const metric: RealtimeMetric = JSON.parse(event.data);
     onData(metric);
   };
 
   ws.onerror = (err) => console.error('WebSocket Error:', err);
   ws.onclose = () => console.log('WebSocket Closed');
-
   return ws;
 }
 ```
@@ -801,19 +930,70 @@ export function connectRealtimeStream(onData: (metric: any) => void) {
 
 ### 📱 5.2. Android Kotlin (Retrofit + OkHttp)
 
-#### Data Model Kotlin:
+#### Data Models Kotlin (khớp 100% `internal/models/metric.go`):
 ```kotlin
 data class HostInfo(
     val hostname: String,
     val os: String,
     val platform: String,
+    val platform_family: String,
+    val platform_version: String,
+    val kernel_version: String,
+    val kernel_arch: String,
+    val uptime: Long,
+    val boot_time: Long,
     val cpu_model: String,
-    val cpu_physical_cores: Int, // Số nhân vật lý
-    val cpu_logical_cores: Int,  // Số luồng logic
+    val cpu_physical_cores: Int,
+    val cpu_logical_cores: Int,
     val cpu_cores: Int,
-    val cpu_mhz: Double,         // Tốc độ MHz (VD: 3400.0)
-    val cpu_speed_ghz: Double,   // Tốc độ GHz (VD: 3.4)
-    val uptime: Long
+    val cpu_mhz: Double,
+    val cpu_speed_ghz: Double
+)
+
+data class PartitionStat(
+    val device: String,
+    val mountpoint: String,
+    val fstype: String,
+    val total: Long,
+    val used: Long,
+    val free: Long,
+    val used_percent: Double,
+    val total_formatted: String,
+    val used_formatted: String,
+    val free_formatted: String
+)
+
+data class ProcessInfo(
+    val pid: Int,
+    val name: String,
+    val cpu_percent: Double,
+    val memory_percent: Float,
+    val memory_rss: Long,
+    val status: String
+)
+
+data class RealtimeMetric(
+    val timestamp: String,
+    val host_info: HostInfo,
+    val cpu_percent: Double,
+    val cpu_cores_percent: List<Double>,
+    val mem_total: Long,
+    val mem_used: Long,
+    val mem_free: Long,
+    val mem_available: Long,
+    val mem_buff_cache: Long,
+    val mem_used_percent: Double,
+    val mem_total_formatted: String,
+    val mem_used_formatted: String,
+    val swap_total: Long,
+    val swap_used: Long,
+    val swap_percent: Double,
+    val partitions: List<PartitionStat>,
+    val net_bytes_sent: Long,
+    val net_bytes_recv: Long,
+    val net_upload_rate: Double,
+    val net_download_rate: Double,
+    val top_processes: List<ProcessInfo>
 )
 ```
 
@@ -850,14 +1030,16 @@ interface SysDashApi {
 ```kotlin
 val client = OkHttpClient()
 val request = Request.Builder()
-    .url("ws://10.0.2.2:8095/api/v1/ws/metrics?token=$jwtToken")
+    .url("ws://10.0.2.2:8095/api/v1/ws/metrics?token=")
     .build()
 
 val listener = object : WebSocketListener() {
     override fun onMessage(webSocket: WebSocket, text: String) {
-        // Parse JSON RealtimeMetric và cập nhật UI (ProgressBar, Gauges, v.v.)
         val metric = Gson().fromJson(text, RealtimeMetric::class.java)
         runOnUiThread {
+            // Cập nhật UI với số liệu đã format chuẩn htop / df -h:
+            // metric.mem_used_formatted (VD: "1.76 GiB")
+            // metric.partitions[0].used_formatted (VD: "28.48 GiB")
             updateDashboard(metric)
         }
     }

@@ -1,8 +1,11 @@
 package collector
 
 import (
+	"bufio"
 	"math"
 	"os"
+	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,7 +29,7 @@ type SystemCollector struct {
 	lastNetCheck time.Time
 	cachedHost   *models.HostInfo
 
-	// CPU times delta tracking for rock-solid accuracy matching htop
+	// CPU times delta tracking (matching htop)
 	lastCPUTotal  float64
 	lastCPUBusy   float64
 	lastCoreTimes []cpu.TimesStat
@@ -46,14 +49,41 @@ func NewSystemCollector() *SystemCollector {
 	return c
 }
 
-// calculateCPUTimes computes busy and total CPU ticks matching htop:
-// In htop, default CPU percentage reflects active CPU execution (User + Nice + System).
-// Iowait is CPU IDLE waiting for I/O (shown in gray in htop, not counted as busy CPU load).
-// Steal is hypervisor cycles taken by other VMs (shown separately in htop).
+// calculateCPUTimes computes busy and total CPU ticks matching htop.
+//   - Iowait: CPU is idle waiting for I/O -> not busy.
+//   - Steal: time stolen by hypervisor -> counted in total, not busy.
+//   - Guest/GuestNice are ALREADY included in User/Nice by the Linux kernel,
+//     so they must NOT be added again (otherwise total is inflated).
 func calculateCPUTimes(t cpu.TimesStat) (busy, total float64) {
 	busy = t.User + t.System + t.Nice + t.Irq + t.Softirq
-	total = busy + t.Idle + t.Iowait + t.Steal + t.Guest + t.GuestNice
+	total = busy + t.Idle + t.Iowait + t.Steal
 	return busy, total
+}
+
+// hostProcPath returns the procfs root used for reading host data (HOST_PROC or /proc)
+func hostProcPath() string {
+	if p := os.Getenv("HOST_PROC"); p != "" {
+		return strings.TrimRight(p, "/")
+	}
+	return "/proc"
+}
+
+// detectHostRoot returns the directory where the host "/" is mounted when running in Docker
+// (e.g. "-v /:/host:ro" -> "/host"). Returns "" when running directly on the host.
+func detectHostRoot() string {
+	if runtime.GOOS != "linux" {
+		return ""
+	}
+	hr := strings.TrimRight(os.Getenv("HOST_ROOT"), "/")
+	if hr == "" {
+		if fi, err := os.Stat("/host"); err == nil && fi.IsDir() {
+			// Only treat /host as host root if it really looks like a root filesystem
+			if _, err := os.Stat("/host/etc"); err == nil {
+				hr = "/host"
+			}
+		}
+	}
+	return hr
 }
 
 // GetHostInfo retrieves static host information (safe for external callers)
@@ -92,7 +122,6 @@ func (c *SystemCollector) getHostInfoLocked() models.HostInfo {
 	if physical, err := cpu.Counts(false); err == nil && physical > 0 {
 		info.CPUPhysicalCores = physical
 	} else if info.CPULogicalCores > 0 {
-		// On VPS (KVM/QEMU/LXC), hypervisor might not expose socket topology
 		info.CPUPhysicalCores = info.CPULogicalCores
 	}
 
@@ -110,7 +139,6 @@ func (c *SystemCollector) getHostInfoLocked() models.HostInfo {
 		}
 	}
 
-	// Final fallback for cores if still 0
 	if info.CPUCores == 0 {
 		info.CPUCores = 1
 	}
@@ -143,35 +171,21 @@ func (c *SystemCollector) Collect() models.RealtimeMetric {
 		deltaBusy := busy - c.lastCPUBusy
 
 		if deltaTotal > 0 && c.lastCPUTotal > 0 {
-			pct := (deltaBusy / deltaTotal) * 100.0
-			if pct < 0 {
-				pct = 0
-			} else if pct > 100 {
-				pct = 100
-			}
-			metric.CPUPercent = math.Round(pct*100) / 100
+			metric.CPUPercent = clampPct(deltaBusy / deltaTotal * 100.0)
 		}
 		c.lastCPUBusy = busy
 		c.lastCPUTotal = total
 	}
 
-	// Per-core CPU % calculation
+	// Per-core CPU %
 	if coreTimes, err := cpu.Times(true); err == nil {
 		if len(c.lastCoreTimes) == len(coreTimes) {
 			perCore := make([]float64, len(coreTimes))
 			for i := range coreTimes {
 				busy, total := calculateCPUTimes(coreTimes[i])
 				lastBusy, lastTotal := calculateCPUTimes(c.lastCoreTimes[i])
-				deltaTotal := total - lastTotal
-				deltaBusy := busy - lastBusy
-				if deltaTotal > 0 {
-					pct := (deltaBusy / deltaTotal) * 100.0
-					if pct < 0 {
-						pct = 0
-					} else if pct > 100 {
-						pct = 100
-					}
-					perCore[i] = math.Round(pct*100) / 100
+				if dt := total - lastTotal; dt > 0 {
+					perCore[i] = clampPct((busy - lastBusy) / dt * 100.0)
 				}
 			}
 			metric.CPUCoresPercent = perCore
@@ -179,46 +193,21 @@ func (c *SystemCollector) Collect() models.RealtimeMetric {
 		c.lastCoreTimes = coreTimes
 	}
 
-	// 2. Memory (Exact htop & free -m formula)
-	// In htop: Used = MemTotal - MemFree - Buffers - Cached
-	// (accounting for Sreclaimable and Shared reported in /proc/meminfo)
-	if vm, err := mem.VirtualMemory(); err == nil {
+	// 2. Memory — same formula as `free` / htop:
+	//    used = MemTotal - MemFree - Buffers - (Cached + SReclaimable)
+	//    NOTE: gopsutil's vm.Cached ALREADY includes SReclaimable on Linux,
+	//    and gopsutil's vm.Used is (Total - Available) which is LARGER than htop.
+	if vm, err := mem.VirtualMemory(); err == nil && vm.Total > 0 {
+		used, buffCache := computeMemUsed(vm)
+
 		metric.MemTotal = vm.Total
-
-		var used uint64
-		if vm.Buffers > 0 || vm.Cached > 0 {
-			cacheAndBuffers := vm.Buffers + vm.Cached
-			if vm.Sreclaimable > 0 {
-				cacheAndBuffers += vm.Sreclaimable
-			}
-			if vm.Shared > 0 && cacheAndBuffers >= vm.Shared {
-				cacheAndBuffers -= vm.Shared
-			}
-
-			if vm.Total >= (vm.Free + cacheAndBuffers) {
-				used = vm.Total - vm.Free - cacheAndBuffers
-			} else if vm.Available > 0 && vm.Available <= vm.Total {
-				used = vm.Total - vm.Available
-			} else {
-				used = vm.Used
-			}
-		} else {
-			// Windows / non-Linux fallback
-			if vm.Used > 0 && vm.Used <= vm.Total {
-				used = vm.Used
-			} else {
-				used = vm.Total - vm.Free
-			}
-		}
-
-		if used > vm.Total {
-			used = vm.Total
-		}
-
 		metric.MemUsed = used
 		metric.MemFree = vm.Total - used
-		usedPct := (float64(used) / float64(vm.Total)) * 100.0
-		metric.MemUsedPercent = math.Round(usedPct*100) / 100
+		metric.MemAvailable = vm.Available
+		metric.MemBuffCache = buffCache
+		metric.MemUsedPercent = math.Round(float64(used)/float64(vm.Total)*10000) / 100
+		metric.MemTotalFormatted = FormatBinary(vm.Total)
+		metric.MemUsedFormatted = FormatBinary(used)
 	}
 
 	if swap, err := mem.SwapMemory(); err == nil {
@@ -227,122 +216,14 @@ func (c *SystemCollector) Collect() models.RealtimeMetric {
 		metric.SwapPercent = math.Round(swap.UsedPercent*100) / 100
 	}
 
-	// 3. Disk Partitions (Accurate host measurement & matching df -h)
-	// Check if running in a container with host root mounted (e.g. -v /:/host:ro)
-	hostRoot := os.Getenv("HOST_ROOT")
-	if hostRoot == "" {
-		if _, err := os.Stat("/host"); err == nil {
-			hostRoot = "/host"
-		}
-	}
+	// 3. Disk partitions (same numbers as `df` on the host)
+	metric.Partitions, _ = collectPartitions(false)
 
-	if partitions, err := disk.Partitions(false); err == nil {
-		var parts []models.PartitionStat
-		seenDisplayMounts := make(map[string]bool)
-
-		for _, p := range partitions {
-			// If running inside container with hostRoot mounted:
-			if hostRoot != "" {
-				// Ignore container's internal rootfs overlay
-				if p.Mountpoint == "/" && strings.EqualFold(p.Fstype, "overlay") {
-					continue
-				}
-				// Only accept mounts from the host
-				if p.Mountpoint != hostRoot && !strings.HasPrefix(p.Mountpoint, hostRoot+"/") {
-					continue
-				}
-			}
-
-			if isVirtualFS(p.Fstype, p.Mountpoint) {
-				continue
-			}
-
-			usage, err := disk.Usage(p.Mountpoint)
-			if err != nil || usage.Total == 0 {
-				continue
-			}
-
-			displayMount := p.Mountpoint
-			// Remap /host to "/" for dashboard display
-			if hostRoot != "" {
-				if displayMount == hostRoot {
-					displayMount = "/"
-				} else if strings.HasPrefix(displayMount, hostRoot+"/") {
-					displayMount = strings.TrimPrefix(displayMount, hostRoot)
-				}
-			}
-
-			if seenDisplayMounts[displayMount] {
-				continue
-			}
-			seenDisplayMounts[displayMount] = true
-
-			// Calculate used percent matching df -h: Use% = Used / (Used + Free) * 100
-			var usedPct float64
-			if usage.Used+usage.Free > 0 {
-				usedPct = (float64(usage.Used) / float64(usage.Used+usage.Free)) * 100.0
-			} else if usage.Total > 0 {
-				usedPct = (float64(usage.Used) / float64(usage.Total)) * 100.0
-			}
-
-			parts = append(parts, models.PartitionStat{
-				Device:      p.Device,
-				Mountpoint:  displayMount,
-				Fstype:      p.Fstype,
-				Total:       usage.Total,
-				Used:        usage.Used,
-				Free:        usage.Free,
-				UsedPercent: math.Round(usedPct*100) / 100,
-			})
-		}
-
-		// Fallback: If no partition detected, measure hostRoot or "/" directly
-		if len(parts) == 0 {
-			targetMount := "/"
-			if hostRoot != "" {
-				targetMount = hostRoot
-			}
-			if usage, err := disk.Usage(targetMount); err == nil && usage.Total > 0 {
-				var usedPct float64
-				if usage.Used+usage.Free > 0 {
-					usedPct = (float64(usage.Used) / float64(usage.Used+usage.Free)) * 100.0
-				} else {
-					usedPct = (float64(usage.Used) / float64(usage.Total)) * 100.0
-				}
-				parts = append(parts, models.PartitionStat{
-					Device:      "root",
-					Mountpoint:  "/",
-					Fstype:      "ext4",
-					Total:       usage.Total,
-					Used:        usage.Used,
-					Free:        usage.Free,
-					UsedPercent: math.Round(usedPct*100) / 100,
-				})
-			}
-		}
-
-		// Sort so Root "/" (Linux) or "C:" (Windows) is ALWAYS index 0
-		sort.Slice(parts, func(i, j int) bool {
-			isRootI := parts[i].Mountpoint == "/" || strings.EqualFold(parts[i].Mountpoint, "C:")
-			isRootJ := parts[j].Mountpoint == "/" || strings.EqualFold(parts[j].Mountpoint, "C:")
-			if isRootI && !isRootJ {
-				return true
-			}
-			if !isRootI && isRootJ {
-				return false
-			}
-			return parts[i].Mountpoint < parts[j].Mountpoint
-		})
-
-		metric.Partitions = parts
-	}
-
-	// 4. Network Rates (Exclude loopback 'lo' and internal virtual interfaces on Linux)
+	// 4. Network rates (exclude loopback & docker virtual interfaces)
 	if ifaces, err := net.IOCounters(true); err == nil && len(ifaces) > 0 {
 		var totalSent, totalRecv uint64
 		for _, iface := range ifaces {
 			name := strings.ToLower(iface.Name)
-			// Ignore loopback, docker virtual bridges, veth, podman, etc.
 			if name == "lo" || strings.HasPrefix(name, "loopback") ||
 				name == "docker0" || strings.HasPrefix(name, "veth") ||
 				strings.HasPrefix(name, "br-") || strings.HasPrefix(name, "virbr") {
@@ -352,8 +233,7 @@ func (c *SystemCollector) Collect() models.RealtimeMetric {
 			totalRecv += iface.BytesRecv
 		}
 
-		// Fallback if all interfaces were skipped
-		if totalSent == 0 && totalRecv == 0 && len(ifaces) > 0 {
+		if totalSent == 0 && totalRecv == 0 {
 			totalSent = ifaces[0].BytesSent
 			totalRecv = ifaces[0].BytesRecv
 		}
@@ -375,35 +255,294 @@ func (c *SystemCollector) Collect() models.RealtimeMetric {
 		c.lastNetCheck = now
 	}
 
-	// 5. Top 5 Processes (safe collector)
+	// 5. Top 5 processes
 	metric.TopProcesses = c.GetProcesses("", "cpu", "desc", 5)
 
 	return metric
 }
 
-// isVirtualFS checks if the filesystem is virtual/pseudo on Linux/Windows
+func clampPct(p float64) float64 {
+	if p < 0 {
+		p = 0
+	} else if p > 100 {
+		p = 100
+	}
+	return math.Round(p*100) / 100
+}
+
+// computeMemUsed returns used memory and buff/cache exactly like `free -b`
+func computeMemUsed(vm *mem.VirtualMemoryStat) (used, buffCache uint64) {
+	if runtime.GOOS != "linux" {
+		// Windows / macOS: gopsutil already returns the OS-native "in use" value
+		return vm.Used, 0
+	}
+	buffCache = vm.Buffers + vm.Cached // vm.Cached = Cached + SReclaimable
+	if vm.Total > vm.Free+buffCache {
+		return vm.Total - vm.Free - buffCache, buffCache
+	}
+	if vm.Available > 0 && vm.Available <= vm.Total {
+		return vm.Total - vm.Available, buffCache
+	}
+	return vm.Total - vm.Free, buffCache
+}
+
+// PartitionDiag explains why a mount was accepted / skipped (used by /system/diagnostics)
+type PartitionDiag struct {
+	Device     string `json:"device"`
+	Mountpoint string `json:"mountpoint"`
+	Fstype     string `json:"fstype"`
+	StatPath   string `json:"stat_path"`
+	Display    string `json:"display"`
+	Decision   string `json:"decision"`
+	Total      uint64 `json:"total,omitempty"`
+	Used       uint64 `json:"used,omitempty"`
+	Free       uint64 `json:"free,omitempty"`
+}
+
+var realLinuxFS = map[string]bool{
+	"ext2": true, "ext3": true, "ext4": true, "xfs": true, "btrfs": true, "zfs": true,
+	"vfat": true, "exfat": true, "ntfs": true, "ntfs3": true, "fuseblk": true, "f2fs": true,
+	"jfs": true, "reiserfs": true, "nfs": true, "nfs4": true, "cifs": true,
+}
+
+// collectPartitions returns real disk partitions with the same numbers as `df` on the host.
+//
+// When running in Docker with "-v /:/host:ro":
+//   - the container "/" (overlay) is ignored,
+//   - "/host"            -> displayed as "/"
+//   - "/host/boot/efi"   -> displayed as "/boot/efi"
+//   - host mounts read from /host/proc/1/mountinfo are statfs'ed through "/host<mountpoint>"
+//   - bind-mounts of the same device (/etc/hosts, /app/sysdash.db, ...) are de-duplicated.
+func collectPartitions(withDiag bool) ([]models.PartitionStat, []PartitionDiag) {
+	hostRoot := detectHostRoot()
+	isLinux := runtime.GOOS == "linux"
+
+	var diags []PartitionDiag
+	note := func(d PartitionDiag) {
+		if withDiag {
+			diags = append(diags, d)
+		}
+	}
+
+	type entry struct {
+		part    models.PartitionStat
+		display string
+	}
+	byDevice := make(map[string]*entry)
+	var order []string
+
+	partitions, _ := disk.Partitions(false)
+	for _, p := range partitions {
+		d := PartitionDiag{Device: p.Device, Mountpoint: p.Mountpoint, Fstype: p.Fstype}
+		fs := strings.ToLower(p.Fstype)
+
+		display := p.Mountpoint
+		statPath := p.Mountpoint
+		if hostRoot != "" {
+			switch {
+			case p.Mountpoint == hostRoot:
+				display, statPath = "/", hostRoot
+			case strings.HasPrefix(p.Mountpoint, hostRoot+"/"):
+				display = strings.TrimPrefix(p.Mountpoint, hostRoot)
+			case p.Mountpoint == "/" && (fs == "overlay" || fs == "aufs"):
+				d.Decision = "skip: container overlay root"
+				note(d)
+				continue
+			default:
+				// Mount path seen from the host namespace (or a container bind mount):
+				// statfs it through the host root mount.
+				statPath = filepath.Join(hostRoot, p.Mountpoint)
+			}
+		}
+		d.Display, d.StatPath = display, statPath
+
+		if isVirtualFS(fs, display) {
+			d.Decision = "skip: virtual/pseudo filesystem"
+			note(d)
+			continue
+		}
+		if isLinux && !strings.HasPrefix(p.Device, "/dev/") && !realLinuxFS[fs] {
+			d.Decision = "skip: not a block device"
+			note(d)
+			continue
+		}
+
+		usage, err := disk.Usage(statPath)
+		if err != nil || usage.Total == 0 {
+			d.Decision = "skip: statfs failed"
+			note(d)
+			continue
+		}
+
+		ps := buildPartitionStat(p.Device, display, p.Fstype, usage)
+		d.Total, d.Used, d.Free = ps.Total, ps.Used, ps.Free
+
+		key := p.Device
+		if !isLinux || key == "" {
+			key = display
+		}
+		if existing, ok := byDevice[key]; ok {
+			// Same device mounted several times (bind mounts): keep the shortest path ("/" wins)
+			if len(display) < len(existing.display) {
+				existing.part = ps
+				existing.display = display
+				d.Decision = "accept (replaces longer duplicate)"
+			} else {
+				d.Decision = "skip: duplicate device"
+			}
+			note(d)
+			continue
+		}
+		byDevice[key] = &entry{part: ps, display: display}
+		order = append(order, key)
+		d.Decision = "accept"
+		note(d)
+	}
+
+	parts := make([]models.PartitionStat, 0, len(order))
+	for _, k := range order {
+		parts = append(parts, byDevice[k].part)
+	}
+
+	// Make sure root "/" is present (statfs host root directly)
+	hasRoot := false
+	for _, p := range parts {
+		if p.Mountpoint == "/" || strings.EqualFold(p.Mountpoint, "C:") {
+			hasRoot = true
+			break
+		}
+	}
+	if !hasRoot && isLinux {
+		target := "/"
+		if hostRoot != "" {
+			target = hostRoot
+		}
+		if usage, err := disk.Usage(target); err == nil && usage.Total > 0 {
+			parts = append(parts, buildPartitionStat("rootfs", "/", usage.Fstype, usage))
+			note(PartitionDiag{Device: "rootfs", Mountpoint: target, StatPath: target, Display: "/",
+				Fstype: usage.Fstype, Decision: "accept (fallback root)", Total: usage.Total, Used: usage.Used, Free: usage.Free})
+		}
+	}
+
+	sort.SliceStable(parts, func(i, j int) bool {
+		ri := parts[i].Mountpoint == "/" || strings.EqualFold(parts[i].Mountpoint, "C:")
+		rj := parts[j].Mountpoint == "/" || strings.EqualFold(parts[j].Mountpoint, "C:")
+		if ri != rj {
+			return ri
+		}
+		return parts[i].Mountpoint < parts[j].Mountpoint
+	})
+
+	return parts, diags
+}
+
+func buildPartitionStat(device, mount, fstype string, u *disk.UsageStat) models.PartitionStat {
+	// df: Use% = Used / (Used + Avail)  (root-reserved blocks excluded)
+	var pct float64
+	if u.Used+u.Free > 0 {
+		pct = float64(u.Used) / float64(u.Used+u.Free) * 100
+	}
+	return models.PartitionStat{
+		Device:         device,
+		Mountpoint:     mount,
+		Fstype:         fstype,
+		Total:          u.Total,
+		Used:           u.Used,
+		Free:           u.Free,
+		UsedPercent:    math.Round(pct*100) / 100,
+		TotalFormatted: FormatBinary(u.Total),
+		UsedFormatted:  FormatBinary(u.Used),
+		FreeFormatted:  FormatBinary(u.Free),
+	}
+}
+
+// isVirtualFS checks if the filesystem is virtual/pseudo (mountpoint is the HOST-relative path)
 func isVirtualFS(fstype, mountpoint string) bool {
 	fs := strings.ToLower(fstype)
 	mount := strings.ToLower(mountpoint)
 
-	// Ignore Linux pseudo filesystems, RAM disks, Snap packages
 	switch fs {
-	case "squashfs", "tmpfs", "devtmpfs", "cgroup", "cgroup2",
-		"proc", "sysfs", "nsfs", "mqueue", "hugetlbfs", "autofs",
-		"binfmt_misc", "tracefs", "debugfs", "fuse.lxcfs", "rpc_pipefs":
+	case "squashfs", "tmpfs", "devtmpfs", "cgroup", "cgroup2", "overlay", "aufs",
+		"proc", "sysfs", "nsfs", "mqueue", "hugetlbfs", "autofs", "devpts",
+		"binfmt_misc", "tracefs", "debugfs", "securityfs", "pstore", "bpf",
+		"configfs", "fusectl", "fuse.lxcfs", "rpc_pipefs", "efivarfs", "ramfs":
 		return true
 	}
 
-	// Ignore common virtual mount paths on Ubuntu
-	if strings.HasPrefix(mount, "/snap") ||
-		strings.HasPrefix(mount, "/sys") ||
-		strings.HasPrefix(mount, "/proc") ||
-		strings.HasPrefix(mount, "/dev") ||
-		strings.HasPrefix(mount, "/run") {
-		return true
+	if mount == "/" {
+		return false
 	}
-
+	for _, prefix := range []string{"/snap", "/sys", "/proc", "/dev", "/run", "/var/lib/docker", "/var/lib/containerd", "/var/snap"} {
+		if mount == prefix || strings.HasPrefix(mount, prefix+"/") {
+			return true
+		}
+	}
 	return false
+}
+
+// Diagnostics returns raw data so the numbers can be compared with `free -b`, `df -B1`, htop.
+func (c *SystemCollector) Diagnostics() map[string]interface{} {
+	result := map[string]interface{}{
+		"goos":      runtime.GOOS,
+		"host_root": detectHostRoot(),
+		"env": map[string]string{
+			"HOST_PROC": os.Getenv("HOST_PROC"),
+			"HOST_SYS":  os.Getenv("HOST_SYS"),
+			"HOST_ROOT": os.Getenv("HOST_ROOT"),
+			"HOST_ETC":  os.Getenv("HOST_ETC"),
+		},
+	}
+	if _, err := os.Stat("/.dockerenv"); err == nil {
+		result["running_in_docker"] = true
+	} else {
+		result["running_in_docker"] = false
+	}
+
+	procRoot := hostProcPath()
+	if _, err := os.ReadFile(filepath.Join(procRoot, "1", "mountinfo")); err != nil {
+		result["host_mountinfo_readable"] = "no: " + err.Error()
+	} else {
+		result["host_mountinfo_readable"] = "yes"
+	}
+
+	// Raw /proc/meminfo (bytes)
+	raw := map[string]uint64{}
+	if f, err := os.Open(filepath.Join(procRoot, "meminfo")); err == nil {
+		sc := bufio.NewScanner(f)
+		for sc.Scan() {
+			fields := strings.Fields(sc.Text())
+			if len(fields) < 2 {
+				continue
+			}
+			key := strings.TrimSuffix(fields[0], ":")
+			switch key {
+			case "MemTotal", "MemFree", "MemAvailable", "Buffers", "Cached", "SReclaimable", "Shmem", "SwapTotal", "SwapFree":
+				if v, err := strconv.ParseUint(fields[1], 10, 64); err == nil {
+					raw[key] = v * 1024
+				}
+			}
+		}
+		f.Close()
+	}
+	result["meminfo_raw_bytes"] = raw
+
+	if vm, err := mem.VirtualMemory(); err == nil {
+		used, buffCache := computeMemUsed(vm)
+		result["memory_computed"] = map[string]interface{}{
+			"total":               vm.Total,
+			"used_like_free_htop": used,
+			"buff_cache":          buffCache,
+			"available":           vm.Available,
+			"gopsutil_used":       vm.Used,
+			"total_formatted":     FormatBinary(vm.Total),
+			"used_formatted":      FormatBinary(used),
+			"formula":             "used = MemTotal - MemFree - Buffers - Cached - SReclaimable",
+		}
+	}
+
+	_, diags := collectPartitions(true)
+	result["partitions_scan"] = diags
+	return result
 }
 
 // GetProcesses returns filtered, sorted and paginated process list
@@ -455,7 +594,6 @@ func (c *SystemCollector) GetProcesses(search, sortBy, order string, limit int) 
 
 	isAsc := strings.ToLower(order) == "asc"
 
-	// Sorting
 	sort.Slice(list, func(i, j int) bool {
 		var less bool
 		switch strings.ToLower(sortBy) {
@@ -467,12 +605,9 @@ func (c *SystemCollector) GetProcesses(search, sortBy, order string, limit int) 
 			less = strings.ToLower(list[i].Name) < strings.ToLower(list[j].Name)
 		case "pid":
 			less = list[i].PID < list[j].PID
-		case "cpu":
-			fallthrough
 		default:
 			less = list[i].CPUPercent < list[j].CPUPercent
 		}
-
 		if isAsc {
 			return less
 		}
@@ -482,6 +617,5 @@ func (c *SystemCollector) GetProcesses(search, sortBy, order string, limit int) 
 	if limit > 0 && len(list) > limit {
 		list = list[:limit]
 	}
-
 	return list
 }
