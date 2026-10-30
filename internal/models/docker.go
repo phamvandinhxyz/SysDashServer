@@ -28,5 +28,5 @@ type DockerContainerInfo struct {
 	MemLimit          uint64            `json:"mem_limit"`           // Giới hạn RAM được cấp (bytes)
 	MemPercent        float64           `json:"mem_percent"`         // Phần trăm RAM (%)
 	MemUsageFormatted string            `json:"mem_usage_formatted"` // VD: "45.20 MB / 1.95 GB"
-	CPUPercent        float64           `json:"cpu_percent"`         // Phần trăm CPU của container (%)
+	CPUPercent        float64           `json:"cpu_percent"`         // Phần trăm CPU chuẩn hóa theo toàn bộ hệ thống (%) (0 - 100%)
 }

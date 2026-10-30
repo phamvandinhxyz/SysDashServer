@@ -111,6 +111,7 @@ docker run -d \
 | `mem_available` / `mem_buff_cache` | `free -b` (cột `available` / `buff/cache`) | lấy từ `/proc/meminfo` |
 | `partitions[].total/used/free` | `df -B1 /` | `Size / Used / Avail`, `used_percent = Used/(Used+Avail)` |
 | `containers[].mem_usage` | `docker stats --no-stream` | `usage - inactive_file` (cgroup v2) / `usage - total_inactive_file` (v1) |
+| `containers[].cpu_percent` | Chuẩn hóa theo Host (0 - 100%) | `(cpu_delta / system_delta) * 100` (chuẩn hóa theo tổng tài nguyên CPU máy chủ, không nhân `onlineCPUs` như `docker stats` CLI để đồng bộ thang đo với Dashboard) |
 | `images[].size` | `docker images` | trường `Size` của Docker Engine API (đơn vị SI) |
 
 #### `GET /system/diagnostics` *(Admin Only)*
@@ -510,7 +511,7 @@ Lấy danh sách các Docker Image trên máy chủ, bao gồm dung lượng ổ
 ---
 
 #### `GET /docker/containers`
-Lấy danh sách tất cả Containers (đang chạy hoặc đã dừng) kèm theo **chi tiết RAM thực tế (Used), giới hạn RAM (Limit), % RAM và % CPU** chuẩn theo công thức `docker stats`.
+Lấy danh sách tất cả Containers (đang chạy hoặc đã dừng) kèm theo **chi tiết RAM thực tế (Used), giới hạn RAM (Limit), % RAM và % CPU** (trong đó % CPU được chuẩn hóa theo toàn bộ hệ thống máy chủ 0 - 100%).
 
 - **Headers**: `Authorization: Bearer <token>`
 - **Response `200 OK`**:

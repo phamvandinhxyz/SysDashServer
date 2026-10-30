@@ -144,7 +144,7 @@ type containerStats struct {
 	err      error
 }
 
-// getContainerStats returns RAM & CPU using EXACTLY the same formulas as the Docker CLI (`docker stats`)
+// getContainerStats returns live RAM matching docker stats and CPU normalized to total host capacity (0 - 100%)
 func (c *DockerCollector) getContainerStats(containerID string) containerStats {
 	var raw dockerContainerStatsRaw
 	if err := c.getJSON(dockerStatsTimeout, "/containers/"+containerID+"/stats?stream=false", &raw); err != nil {
@@ -169,15 +169,13 @@ func (c *DockerCollector) getContainerStats(containerID string) containerStats {
 		s.memPct = math.Round(float64(s.memUsage)/float64(s.memLimit)*10000) / 100
 	}
 
-	// CPU — docker/cli calculateCPUPercentUnix()
+	// CPU — normalized host CPU percent (0 - 100% of entire system capacity).
+	// Docker CLI multiplies by onlineCPUs (yielding per-core % up to N*100%),
+	// which causes discrepancies on dashboard overviews where total host CPU is 0 - 100%.
 	cpuDelta := float64(raw.CPUStats.CPUUsage.TotalUsage) - float64(raw.PreCPUStats.CPUUsage.TotalUsage)
 	systemDelta := float64(raw.CPUStats.SystemCPUUsage) - float64(raw.PreCPUStats.SystemCPUUsage)
-	onlineCPUs := float64(raw.CPUStats.OnlineCPUs)
-	if onlineCPUs == 0 {
-		onlineCPUs = float64(len(raw.CPUStats.CPUUsage.PercpuUsage))
-	}
-	if systemDelta > 0 && cpuDelta > 0 && onlineCPUs > 0 {
-		s.cpuPct = math.Round(cpuDelta/systemDelta*onlineCPUs*100*100) / 100
+	if systemDelta > 0 && cpuDelta > 0 {
+		s.cpuPct = math.Round((cpuDelta/systemDelta)*100*100) / 100
 	}
 	return s
 }
