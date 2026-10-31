@@ -1,4 +1,4 @@
-# 📖 SysDashServer — API Specification & Integration Guide
+﻿# 📖 SysDashServer — API Specification & Integration Guide
 
 > **SysDashServer** là backend giám sát hệ thống thời gian thực (CPU, RAM, Disk, Network, Top Processes, Docker) viết bằng **Golang**, hỗ trợ cơ chế xác thực **JWT**, phân quyền **RBAC (Admin / Viewer)**, và **WebSocket Streaming**.
 
@@ -111,7 +111,8 @@ docker run -d \
 | `mem_available` / `mem_buff_cache` | `free -b` (cột `available` / `buff/cache`) | lấy từ `/proc/meminfo` |
 | `partitions[].total/used/free` | `df -B1 /` | `Size / Used / Avail`, `used_percent = Used/(Used+Avail)` |
 | `containers[].mem_usage` | `docker stats --no-stream` | `usage - inactive_file` (cgroup v2) / `usage - total_inactive_file` (v1) |
-| `containers[].cpu_percent` | Chuẩn hóa theo Host (0 - 100%) | `(cpu_delta / system_delta) * 100` (chuẩn hóa theo tổng tài nguyên CPU máy chủ, không nhân `onlineCPUs` như `docker stats` CLI để đồng bộ thang đo với Dashboard) |
+| `containers[].mem_limit` | `docker stats` | Giới hạn RAM của container hoặc tổng RAM host nếu không giới hạn (loại bỏ lỗi 8 EiB của cgroup v1) |
+| `containers[].cpu_percent` | `docker stats` (Irix mode) | `(cpu_delta / system_delta) * onlineCPUs * 100` (chuẩn theo công thức `docker stats` CLI, 1 core = 100%) |
 | `top_processes[].cpu_percent` | Chuẩn Irix mode (`htop`) | `p.CPUPercent()` nguyên bản từ `gopsutil` (1 core = 100%) |
 | `top_memory_processes[].memory_percent` | `htop` / `free` | Top 5 tiến trình ngốn RAM nhất (`RSS / MemTotal * 100`) |
 | `images[].size` | `docker images` | trường `Size` của Docker Engine API (đơn vị SI) |
@@ -551,7 +552,7 @@ Lấy danh sách các Docker Image trên máy chủ, bao gồm dung lượng ổ
 ---
 
 #### `GET /docker/containers`
-Lấy danh sách tất cả Containers (đang chạy hoặc đã dừng) kèm theo **chi tiết RAM thực tế (Used), giới hạn RAM (Limit), % RAM và % CPU** (trong đó % CPU được chuẩn hóa theo toàn bộ hệ thống máy chủ 0 - 100%).
+Lấy danh sách tất cả Containers (đang chạy hoặc đã dừng) kèm theo **chi tiết RAM thực tế (Used), giới hạn RAM (Limit), % RAM và % CPU** chuẩn theo công thức lệnh `docker stats` (Irix mode: 1 core = 100%).
 
 - **Headers**: `Authorization: Bearer <token>`
 - **Response `200 OK`**:
@@ -1109,3 +1110,6 @@ val listener = object : WebSocketListener() {
 
 val ws = client.newWebSocket(request, listener)
 ```
+
+
+

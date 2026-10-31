@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"SysDashServer/internal/models"
+
+	"github.com/shirou/gopsutil/v4/mem"
 )
 
 type DockerCollector struct {
@@ -144,8 +146,8 @@ type containerStats struct {
 	err      error
 }
 
-// getContainerStats returns live RAM matching docker stats and CPU normalized to total host capacity (0 - 100%)
-func (c *DockerCollector) getContainerStats(containerID string) containerStats {
+// getContainerStats returns live RAM matching docker stats and CPU in standard docker stats format (Irix mode: 1 core = 100%)
+func (c *DockerCollector) getContainerStats(containerID string, hostMemTotal uint64) containerStats {
 	var raw dockerContainerStatsRaw
 	if err := c.getJSON(dockerStatsTimeout, "/containers/"+containerID+"/stats?stream=false", &raw); err != nil {
 		return containerStats{err: err}
@@ -156,27 +158,52 @@ func (c *DockerCollector) getContainerStats(containerID string) containerStats {
 	// RAM — docker/cli calculateMemUsageUnixNoCache():
 	//   cgroup v1: usage - total_inactive_file
 	//   cgroup v2: usage - inactive_file
+	//   fallback:  usage - cache
 	usage := raw.MemoryStats.Usage
 	s.memUsage = usage
 	if v, ok := raw.MemoryStats.Stats["total_inactive_file"]; ok && v < usage {
 		s.memUsage = usage - v
 	} else if v, ok := raw.MemoryStats.Stats["inactive_file"]; ok && v < usage {
 		s.memUsage = usage - v
+	} else if v, ok := raw.MemoryStats.Stats["cache"]; ok && v < usage {
+		s.memUsage = usage - v
 	}
 
-	s.memLimit = raw.MemoryStats.Limit
+	// RAM Limit — docker/cli:
+	// If container has no memory limit configured, cgroup v1 reports 9223372036854771712 (~8 EiB).
+	// Docker stats substitutes the host system's total physical memory in this case.
+	limit := raw.MemoryStats.Limit
+	const cgroupV1Unlimited = 9223372036854771712 // 0x7FFFFFFFFFFFF000
+	if limit == 0 || limit >= cgroupV1Unlimited || (hostMemTotal > 0 && limit > hostMemTotal) {
+		limit = hostMemTotal
+	}
+	s.memLimit = limit
+
 	if s.memLimit > 0 {
 		s.memPct = math.Round(float64(s.memUsage)/float64(s.memLimit)*10000) / 100
 	}
 
-	// CPU — normalized host CPU percent (0 - 100% of entire system capacity).
-	// Docker CLI multiplies by onlineCPUs (yielding per-core % up to N*100%),
-	// which causes discrepancies on dashboard overviews where total host CPU is 0 - 100%.
-	cpuDelta := float64(raw.CPUStats.CPUUsage.TotalUsage) - float64(raw.PreCPUStats.CPUUsage.TotalUsage)
-	systemDelta := float64(raw.CPUStats.SystemCPUUsage) - float64(raw.PreCPUStats.SystemCPUUsage)
-	if systemDelta > 0 && cpuDelta > 0 {
-		s.cpuPct = math.Round((cpuDelta/systemDelta)*100*100) / 100
+	// CPU — docker/cli calculateCPUPercentUnix():
+	// Docker CLI computes: (cpuDelta / systemDelta) * onlineCPUs * 100.0 (Irix mode: 1 core = 100%)
+	if raw.PreCPUStats.CPUUsage.TotalUsage > 0 && raw.PreCPUStats.SystemCPUUsage > 0 {
+		cpuDelta := float64(raw.CPUStats.CPUUsage.TotalUsage) - float64(raw.PreCPUStats.CPUUsage.TotalUsage)
+		systemDelta := float64(raw.CPUStats.SystemCPUUsage) - float64(raw.PreCPUStats.SystemCPUUsage)
+		onlineCPUs := float64(raw.CPUStats.OnlineCPUs)
+		if onlineCPUs == 0 {
+			onlineCPUs = float64(len(raw.CPUStats.CPUUsage.PercpuUsage))
+		}
+		if onlineCPUs == 0 {
+			onlineCPUs = float64(runtime.NumCPU())
+		}
+		if onlineCPUs == 0 {
+			onlineCPUs = 1.0
+		}
+
+		if systemDelta > 0 && cpuDelta > 0 {
+			s.cpuPct = math.Round(((cpuDelta/systemDelta)*onlineCPUs*100.0)*100) / 100
+		}
 	}
+
 	return s
 }
 
@@ -197,6 +224,11 @@ func (c *DockerCollector) GetContainers() ([]models.DockerContainerInfo, error) 
 		return nil, err
 	}
 
+	var hostMemTotal uint64
+	if vm, err := mem.VirtualMemory(); err == nil && vm.Total > 0 {
+		hostMemTotal = vm.Total
+	}
+
 	containers := make([]models.DockerContainerInfo, len(raw))
 	stats := make([]containerStats, len(raw))
 
@@ -213,6 +245,11 @@ func (c *DockerCollector) GetContainers() ([]models.DockerContainerInfo, error) 
 			names = append(names, strings.TrimPrefix(n, "/"))
 		}
 
+		labels := item.Labels
+		if labels == nil {
+			labels = make(map[string]string)
+		}
+
 		containers[i] = models.DockerContainerInfo{
 			ID:                id,
 			Names:             names,
@@ -222,7 +259,7 @@ func (c *DockerCollector) GetContainers() ([]models.DockerContainerInfo, error) 
 			Created:           item.Created,
 			State:             item.State,
 			Status:            item.Status,
-			Labels:            item.Labels,
+			Labels:            labels,
 			MemUsageFormatted: "0 B",
 		}
 
@@ -232,7 +269,7 @@ func (c *DockerCollector) GetContainers() ([]models.DockerContainerInfo, error) 
 				defer wg.Done()
 				sem <- struct{}{}
 				defer func() { <-sem }()
-				stats[idx] = c.getContainerStats(fullID)
+				stats[idx] = c.getContainerStats(fullID, hostMemTotal)
 			}(i, item.ID)
 		}
 	}
