@@ -23,6 +23,7 @@ services:
     environment:
       - TZ=Asia/Ho_Chi_Minh
       # Khai báo đường dẫn proc/sys/root để gopsutil đọc tài nguyên từ máy chủ VPS
+      - DB_PATH=/app/data/sysdash.db
       - HOST_PROC=/host/proc
       - HOST_SYS=/host/sys
       - HOST_ROOT=/host
