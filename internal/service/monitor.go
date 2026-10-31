@@ -135,6 +135,8 @@ func (s *MonitorService) saveSnapshot(m models.RealtimeMetric) {
 		DiskTotal:       diskTotal,
 		DiskUsed:        diskUsed,
 		DiskPercent:     diskPct,
+		DiskReadRate:    m.DiskReadRate,
+		DiskWriteRate:   m.DiskWriteRate,
 		NetBytesSent:    m.NetBytesSent,
 		NetBytesRecv:    m.NetBytesRecv,
 		NetUploadRate:   m.NetUploadRate,

@@ -13,6 +13,8 @@ type MetricRecord struct {
 	DiskTotal       uint64    `json:"disk_total"`
 	DiskUsed        uint64    `json:"disk_used"`
 	DiskPercent     float64   `json:"disk_percent"`
+	DiskReadRate    float64   `json:"disk_read_rate"`  // bytes/sec
+	DiskWriteRate   float64   `json:"disk_write_rate"` // bytes/sec
 	NetBytesSent    uint64    `json:"net_bytes_sent"`
 	NetBytesRecv    uint64    `json:"net_bytes_recv"`
 	NetUploadRate   float64   `json:"net_upload_rate"`   // bytes/sec
@@ -80,6 +82,9 @@ type RealtimeMetric struct {
 	SwapUsed           uint64          `json:"swap_used"`
 	SwapPercent        float64         `json:"swap_percent"`
 	Partitions         []PartitionStat `json:"partitions"`
+	DiskPercent        float64         `json:"disk_percent"`
+	DiskReadRate       float64         `json:"disk_read_rate"`  // bytes/sec
+	DiskWriteRate      float64         `json:"disk_write_rate"` // bytes/sec
 	NetBytesSent       uint64          `json:"net_bytes_sent"`
 	NetBytesRecv       uint64          `json:"net_bytes_recv"`
 	NetUploadRate      float64         `json:"net_upload_rate"`
@@ -90,20 +95,24 @@ type RealtimeMetric struct {
 
 // MetricSummary provides statistical aggregates (Min, Max, Avg) over a time period
 type MetricSummary struct {
-	TimeRange       string    `json:"time_range"`
-	From            time.Time `json:"from"`
-	To              time.Time `json:"to"`
-	SampleCount     int       `json:"sample_count"`
-	AvgCPU          float64   `json:"avg_cpu"`
-	MinCPU          float64   `json:"min_cpu"`
-	MaxCPU          float64   `json:"max_cpu"`
-	AvgMemPercent   float64   `json:"avg_mem_percent"`
-	MinMemPercent   float64   `json:"min_mem_percent"`
-	MaxMemPercent   float64   `json:"max_mem_percent"`
-	AvgDiskPercent  float64   `json:"avg_disk_percent"`
-	MaxDiskPercent  float64   `json:"max_disk_percent"`
-	AvgUploadRate   float64   `json:"avg_upload_rate"`
-	MaxUploadRate   float64   `json:"max_upload_rate"`
-	AvgDownloadRate float64   `json:"avg_download_rate"`
-	MaxDownloadRate float64   `json:"max_download_rate"`
+	TimeRange        string    `json:"time_range"`
+	From             time.Time `json:"from"`
+	To               time.Time `json:"to"`
+	SampleCount      int       `json:"sample_count"`
+	AvgCPU           float64   `json:"avg_cpu"`
+	MinCPU           float64   `json:"min_cpu"`
+	MaxCPU           float64   `json:"max_cpu"`
+	AvgMemPercent    float64   `json:"avg_mem_percent"`
+	MinMemPercent    float64   `json:"min_mem_percent"`
+	MaxMemPercent    float64   `json:"max_mem_percent"`
+	AvgDiskPercent   float64   `json:"avg_disk_percent"`
+	MaxDiskPercent   float64   `json:"max_disk_percent"`
+	AvgDiskReadRate  float64   `json:"avg_disk_read_rate"`
+	MaxDiskReadRate  float64   `json:"max_disk_read_rate"`
+	AvgDiskWriteRate float64   `json:"avg_disk_write_rate"`
+	MaxDiskWriteRate float64   `json:"max_disk_write_rate"`
+	AvgUploadRate    float64   `json:"avg_upload_rate"`
+	MaxUploadRate    float64   `json:"max_upload_rate"`
+	AvgDownloadRate  float64   `json:"avg_download_rate"`
+	MaxDownloadRate  float64   `json:"max_download_rate"`
 }

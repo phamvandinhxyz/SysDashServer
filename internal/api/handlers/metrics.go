@@ -169,12 +169,14 @@ func (h *MetricsHandler) GetSummary(c *gin.Context) {
 		return
 	}
 
-	var sumCPU, sumMem, sumDisk, sumUp, sumDown float64
+	var sumCPU, sumMem, sumDisk, sumDiskRead, sumDiskWrite, sumUp, sumDown float64
 	minCPU := math.MaxFloat64
 	maxCPU := 0.0
 	minMem := math.MaxFloat64
 	maxMem := 0.0
 	maxDisk := 0.0
+	maxDiskRead := 0.0
+	maxDiskWrite := 0.0
 	maxUp := 0.0
 	maxDown := 0.0
 
@@ -200,6 +202,16 @@ func (h *MetricsHandler) GetSummary(c *gin.Context) {
 			maxDisk = r.DiskPercent
 		}
 
+		sumDiskRead += r.DiskReadRate
+		if r.DiskReadRate > maxDiskRead {
+			maxDiskRead = r.DiskReadRate
+		}
+
+		sumDiskWrite += r.DiskWriteRate
+		if r.DiskWriteRate > maxDiskWrite {
+			maxDiskWrite = r.DiskWriteRate
+		}
+
 		sumUp += r.NetUploadRate
 		if r.NetUploadRate > maxUp {
 			maxUp = r.NetUploadRate
@@ -213,22 +225,26 @@ func (h *MetricsHandler) GetSummary(c *gin.Context) {
 
 	n := float64(len(records))
 	summary := models.MetricSummary{
-		TimeRange:       rangeParam,
-		From:            from,
-		To:              to,
-		SampleCount:     len(records),
-		AvgCPU:          round(sumCPU / n),
-		MinCPU:          round(minCPU),
-		MaxCPU:          round(maxCPU),
-		AvgMemPercent:   round(sumMem / n),
-		MinMemPercent:   round(minMem),
-		MaxMemPercent:   round(maxMem),
-		AvgDiskPercent:  round(sumDisk / n),
-		MaxDiskPercent:  round(maxDisk),
-		AvgUploadRate:   round(sumUp / n),
-		MaxUploadRate:   round(maxUp),
-		AvgDownloadRate: round(sumDown / n),
-		MaxDownloadRate: round(maxDown),
+		TimeRange:        rangeParam,
+		From:             from,
+		To:               to,
+		SampleCount:      len(records),
+		AvgCPU:           round(sumCPU / n),
+		MinCPU:           round(minCPU),
+		MaxCPU:           round(maxCPU),
+		AvgMemPercent:    round(sumMem / n),
+		MinMemPercent:    round(minMem),
+		MaxMemPercent:    round(maxMem),
+		AvgDiskPercent:   round(sumDisk / n),
+		MaxDiskPercent:   round(maxDisk),
+		AvgDiskReadRate:  round(sumDiskRead / n),
+		MaxDiskReadRate:  round(maxDiskRead),
+		AvgDiskWriteRate: round(sumDiskWrite / n),
+		MaxDiskWriteRate: round(maxDiskWrite),
+		AvgUploadRate:    round(sumUp / n),
+		MaxUploadRate:    round(maxUp),
+		AvgDownloadRate:  round(sumDown / n),
+		MaxDownloadRate:  round(maxDown),
 	}
 
 	c.JSON(http.StatusOK, summary)
@@ -319,7 +335,7 @@ func aggregateRecords(records []models.MetricRecord, bucket time.Duration) []mod
 	var result []models.MetricRecord
 	var currentBucketTime time.Time
 	var count int
-	var sumCPU, sumMem, sumDisk, sumUp, sumDown float64
+	var sumCPU, sumMem, sumDisk, sumDiskRead, sumDiskWrite, sumUp, sumDown float64
 	var lastMemTotal, lastDiskTotal uint64
 
 	flushBucket := func() {
@@ -335,6 +351,8 @@ func aggregateRecords(records []models.MetricRecord, bucket time.Duration) []mod
 			MemUsedPercent:  round(sumMem / c),
 			DiskTotal:       lastDiskTotal,
 			DiskPercent:     round(sumDisk / c),
+			DiskReadRate:    round(sumDiskRead / c),
+			DiskWriteRate:   round(sumDiskWrite / c),
 			NetUploadRate:   round(sumUp / c),
 			NetDownloadRate: round(sumDown / c),
 		})
@@ -353,6 +371,8 @@ func aggregateRecords(records []models.MetricRecord, bucket time.Duration) []mod
 			sumCPU = 0
 			sumMem = 0
 			sumDisk = 0
+			sumDiskRead = 0
+			sumDiskWrite = 0
 			sumUp = 0
 			sumDown = 0
 		}
@@ -361,6 +381,8 @@ func aggregateRecords(records []models.MetricRecord, bucket time.Duration) []mod
 		sumCPU += r.CPUPercent
 		sumMem += r.MemUsedPercent
 		sumDisk += r.DiskPercent
+		sumDiskRead += r.DiskReadRate
+		sumDiskWrite += r.DiskWriteRate
 		sumUp += r.NetUploadRate
 		sumDown += r.NetDownloadRate
 		lastMemTotal = r.MemTotal

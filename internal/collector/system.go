@@ -34,11 +34,18 @@ type SystemCollector struct {
 	lastCPUBusy   float64
 	lastCoreTimes []cpu.TimesStat
 	lastProcesses []models.ProcessInfo
+
+	// Disk I/O delta tracking
+	lastDiskRead    uint64
+	lastDiskWrite   uint64
+	lastDiskIOCheck time.Time
+	hasDiskIOSample bool
 }
 
 func NewSystemCollector() *SystemCollector {
 	c := &SystemCollector{
-		lastNetCheck: time.Now(),
+		lastNetCheck:    time.Now(),
+		lastDiskIOCheck: time.Now(),
 	}
 	// Initial CPU times sampling to prime the delta calculator
 	if times, err := cpu.Times(false); err == nil && len(times) > 0 {
@@ -46,6 +53,12 @@ func NewSystemCollector() *SystemCollector {
 	}
 	if coreTimes, err := cpu.Times(true); err == nil {
 		c.lastCoreTimes = coreTimes
+	}
+	// Initial Disk I/O sampling to prime the delta calculator
+	if totalRead, totalWrite, err := collectDiskIOBytes(); err == nil {
+		c.lastDiskRead = totalRead
+		c.lastDiskWrite = totalWrite
+		c.hasDiskIOSample = true
 	}
 	return c
 }
@@ -219,8 +232,37 @@ func (c *SystemCollector) Collect() models.RealtimeMetric {
 
 	// 3. Disk partitions (same numbers as `df` on the host)
 	metric.Partitions, _ = collectPartitions(false)
+	if len(metric.Partitions) > 0 {
+		var totalDisk, usedDisk uint64
+		for _, p := range metric.Partitions {
+			totalDisk += p.Total
+			usedDisk += p.Used
+		}
+		if totalDisk > 0 {
+			metric.DiskPercent = math.Round(float64(usedDisk)/float64(totalDisk)*10000) / 100
+		} else {
+			metric.DiskPercent = metric.Partitions[0].UsedPercent
+		}
+	}
 
-	// 4. Network rates (exclude loopback & docker virtual interfaces)
+	// 4. Disk I/O rates (bytes/sec)
+	if totalRead, totalWrite, err := collectDiskIOBytes(); err == nil {
+		duration := now.Sub(c.lastDiskIOCheck).Seconds()
+		if duration > 0 && c.hasDiskIOSample {
+			if totalRead >= c.lastDiskRead {
+				metric.DiskReadRate = math.Round((float64(totalRead-c.lastDiskRead)/duration)*100) / 100
+			}
+			if totalWrite >= c.lastDiskWrite {
+				metric.DiskWriteRate = math.Round((float64(totalWrite-c.lastDiskWrite)/duration)*100) / 100
+			}
+		}
+		c.lastDiskRead = totalRead
+		c.lastDiskWrite = totalWrite
+		c.lastDiskIOCheck = now
+		c.hasDiskIOSample = true
+	}
+
+	// 5. Network rates (exclude loopback & docker virtual interfaces)
 	if ifaces, err := net.IOCounters(true); err == nil && len(ifaces) > 0 {
 		var totalSent, totalRecv uint64
 		for _, iface := range ifaces {
@@ -256,7 +298,7 @@ func (c *SystemCollector) Collect() models.RealtimeMetric {
 		c.lastNetCheck = now
 	}
 
-	// 5. Processes snapshot
+	// 6. Processes snapshot
 	allProcs := c.getAllProcesses("")
 	c.lastProcesses = allProcs
 	metric.TopProcesses = sortProcesses(allProcs, "cpu", "desc", 100)
@@ -450,6 +492,86 @@ func collectPartitions(withDiag bool) ([]models.PartitionStat, []PartitionDiag) 
 	})
 
 	return parts, diags
+}
+
+// collectDiskIOBytes aggregates total ReadBytes and WriteBytes across real disks.
+// On Windows: disk.IOCounters() returns logical drives (C:, D:).
+// On Linux: disk.IOCounters() reads /proc/diskstats and returns whole disks and partitions.
+// Partitions and pseudo/virtual devices (loop, ram, zram) are filtered to avoid double-counting.
+func collectDiskIOBytes() (totalRead, totalWrite uint64, err error) {
+	counters, err := disk.IOCounters()
+	if err != nil {
+		return 0, 0, err
+	}
+	if len(counters) == 0 {
+		return 0, 0, nil
+	}
+
+	allDevs := make(map[string]struct{}, len(counters))
+	for name := range counters {
+		allDevs[strings.ToLower(name)] = struct{}{}
+	}
+
+	for name, stat := range counters {
+		if shouldSkipDiskDevice(name, allDevs) {
+			continue
+		}
+		totalRead += stat.ReadBytes
+		totalWrite += stat.WriteBytes
+	}
+	return totalRead, totalWrite, nil
+}
+
+func shouldSkipDiskDevice(name string, allDevs map[string]struct{}) bool {
+	name = strings.ToLower(name)
+	// 1. Skip virtual RAM / loop / pseudo devices
+	if strings.HasPrefix(name, "loop") || strings.HasPrefix(name, "ram") ||
+		strings.HasPrefix(name, "zram") || strings.HasPrefix(name, "sr") ||
+		strings.HasPrefix(name, "fd") {
+		return true
+	}
+
+	// 2. NVMe partitions: nvmeXnYpZ -> parent nvmeXnY
+	if strings.HasPrefix(name, "nvme") {
+		if idx := strings.LastIndex(name, "p"); idx != -1 {
+			parent := name[:idx]
+			if _, exists := allDevs[parent]; exists {
+				return true
+			}
+		}
+		return false
+	}
+
+	// 3. MMC / eMMC partitions: mmcblkXpY -> parent mmcblkX
+	if strings.HasPrefix(name, "mmcblk") {
+		if idx := strings.LastIndex(name, "p"); idx != -1 {
+			parent := name[:idx]
+			if _, exists := allDevs[parent]; exists {
+				return true
+			}
+		}
+		return false
+	}
+
+	// 4. Standard disks (sd*, vd*, xvd*, hd*): trim trailing digits to find parent (e.g., sda1 -> sda)
+	trimmed := strings.TrimRight(name, "0123456789")
+	if trimmed != name && trimmed != "" {
+		if _, exists := allDevs[trimmed]; exists {
+			return true
+		}
+	}
+
+	// 5. Device-mapper (dm-*): if any physical disks exist, skip dm to avoid double-counting
+	if strings.HasPrefix(name, "dm-") {
+		for d := range allDevs {
+			if strings.HasPrefix(d, "sd") || strings.HasPrefix(d, "vd") ||
+				strings.HasPrefix(d, "nvme") || strings.HasPrefix(d, "xvd") {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 func buildPartitionStat(device, mount, fstype string, u *disk.UsageStat) models.PartitionStat {

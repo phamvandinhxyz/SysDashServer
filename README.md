@@ -115,6 +115,8 @@ docker run -d \
 | `containers[].cpu_percent` | `docker stats` (Irix mode) | `(cpu_delta / system_delta) * onlineCPUs * 100` (chuẩn theo công thức `docker stats` CLI, 1 core = 100%) |
 | `top_processes[].cpu_percent` | Chuẩn Irix mode (`htop`) | `p.CPUPercent()` nguyên bản từ `gopsutil` (1 core = 100%) |
 | `top_memory_processes[].memory_percent` | `htop` / `free` | Top 5 tiến trình ngốn RAM nhất (`RSS / MemTotal * 100`) |
+| `disk_percent` | `df` | Tỷ lệ sử dụng toàn bộ ổ đĩa (`disk_used / disk_total * 100`) |
+| `disk_read_rate` / `disk_write_rate` | `iostat` / `iotop` | Tốc độ đọc / ghi I/O đĩa thực tế tính theo bytes/giây qua `disk.IOCounters()` |
 | `images[].size` | `docker images` | trường `Size` của Docker Engine API (đơn vị SI) |
 
 #### `GET /system/diagnostics` *(Admin Only)*
@@ -308,6 +310,9 @@ Lấy ảnh chụp số liệu phần cứng tức thời (chứa `host_info`, C
       "free_formatted": "48.87 GiB"
     }
   ],
+  "disk_percent": 36.82,
+  "disk_read_rate": 154200.0,
+  "disk_write_rate": 845000.0,
   "net_bytes_sent": 1450239044,
   "net_bytes_recv": 9823485023,
   "net_upload_rate": 125430.5,
@@ -374,6 +379,9 @@ Lấy ảnh chụp số liệu phần cứng tức thời (chứa `host_info`, C
 | `partitions[].total_formatted` | string | Chuỗi GiB | Tổng dung lượng định dạng 1024-based (VD: `77.35 GiB` khớp `df -h`) |
 | `partitions[].used_formatted` | string | Chuỗi GiB | Dung lượng dùng định dạng 1024-based (VD: `28.48 GiB` khớp `df -h`) |
 | `partitions[].free_formatted` | string | Chuỗi GiB | Dung lượng trống định dạng 1024-based (VD: `48.87 GiB` khớp `df -h`) |
+| `disk_percent` | float64 | % | Tỷ lệ phần trăm sử dụng toàn bộ ổ đĩa (`total_used / total_size * 100`) |
+| `disk_read_rate` | float64 | bytes/s | Tốc độ đọc ổ đĩa thực tế đo bằng `disk.IOCounters()` (loại trừ đĩa ảo) |
+| `disk_write_rate` | float64 | bytes/s | Tốc độ ghi ổ đĩa thực tế đo bằng `disk.IOCounters()` (loại trừ đĩa ảo) |
 
 ---
 
@@ -409,6 +417,8 @@ Lấy dữ liệu chuỗi thời gian để vẽ đồ thị (hỗ trợ Downsam
       "disk_total": 511000000000,
       "disk_used": 285000000000,
       "disk_percent": 55.77,
+      "disk_read_rate": 125000.0,
+      "disk_write_rate": 450000.0,
       "net_bytes_sent": 1450239044,
       "net_bytes_recv": 9823485023,
       "net_upload_rate": 84200.5,
@@ -439,6 +449,10 @@ Lấy thống kê Min, Max, Average của các chỉ số trong một khoảng t
   "max_mem_percent": 84.10,
   "avg_disk_percent": 55.77,
   "max_disk_percent": 56.12,
+  "avg_disk_read_rate": 125000.0,
+  "max_disk_read_rate": 4520000.0,
+  "avg_disk_write_rate": 350000.0,
+  "max_disk_write_rate": 12800000.0,
   "avg_upload_rate": 95420.15,
   "max_upload_rate": 15420000.0,
   "avg_download_rate": 624100.80,
@@ -649,6 +663,9 @@ Kết nối WebSocket để nhận dữ liệu đẩy về liên tục mỗi **2
       "free_formatted": "48.87 GiB"
     }
   ],
+  "disk_percent": 36.82,
+  "disk_read_rate": 120000.0,
+  "disk_write_rate": 350000.0,
   "net_bytes_sent": 1450250000,
   "net_bytes_recv": 9823500000,
   "net_upload_rate": 5500.0,
