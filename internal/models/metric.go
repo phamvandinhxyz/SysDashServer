@@ -52,7 +52,7 @@ type PartitionStat struct {
 	FreeFormatted  string  `json:"free_formatted"`
 }
 
-// ProcessInfo represents running process details with normalized CPU and RAM
+// ProcessInfo represents running process details with raw CPU (Irix mode) and RAM
 type ProcessInfo struct {
 	PID           int32   `json:"pid"`
 	Name          string  `json:"name"`
@@ -64,27 +64,28 @@ type ProcessInfo struct {
 
 // RealtimeMetric is the full payload sent over WebSocket and current metric endpoint
 type RealtimeMetric struct {
-	Timestamp         time.Time       `json:"timestamp"`
-	HostInfo          HostInfo        `json:"host_info"`
-	CPUPercent        float64         `json:"cpu_percent"`
-	CPUCoresPercent   []float64       `json:"cpu_cores_percent"`
-	MemTotal          uint64          `json:"mem_total"`      // bytes (MemTotal trong /proc/meminfo)
-	MemUsed           uint64          `json:"mem_used"`       // bytes (giống cột "used" của `free -b`)
-	MemFree           uint64          `json:"mem_free"`       // bytes = MemTotal - MemUsed
-	MemAvailable      uint64          `json:"mem_available"`  // bytes (cột "available" của `free -b`)
-	MemBuffCache      uint64          `json:"mem_buff_cache"` // bytes (cột "buff/cache" của `free -b`)
-	MemUsedPercent    float64         `json:"mem_used_percent"`
-	MemTotalFormatted string          `json:"mem_total_formatted"` // 1024-based, giống htop (VD: "3.82 GiB")
-	MemUsedFormatted  string          `json:"mem_used_formatted"`
-	SwapTotal         uint64          `json:"swap_total"`
-	SwapUsed          uint64          `json:"swap_used"`
-	SwapPercent       float64         `json:"swap_percent"`
-	Partitions        []PartitionStat `json:"partitions"`
-	NetBytesSent      uint64          `json:"net_bytes_sent"`
-	NetBytesRecv      uint64          `json:"net_bytes_recv"`
-	NetUploadRate     float64         `json:"net_upload_rate"`
-	NetDownloadRate   float64         `json:"net_download_rate"`
-	TopProcesses      []ProcessInfo   `json:"top_processes"`
+	Timestamp          time.Time       `json:"timestamp"`
+	HostInfo           HostInfo        `json:"host_info"`
+	CPUPercent         float64         `json:"cpu_percent"`
+	CPUCoresPercent    []float64       `json:"cpu_cores_percent"`
+	MemTotal           uint64          `json:"mem_total"`      // bytes (MemTotal trong /proc/meminfo)
+	MemUsed            uint64          `json:"mem_used"`       // bytes (giống cột "used" của `free -b`)
+	MemFree            uint64          `json:"mem_free"`       // bytes = MemTotal - MemUsed
+	MemAvailable       uint64          `json:"mem_available"`  // bytes (cột "available" của `free -b`)
+	MemBuffCache       uint64          `json:"mem_buff_cache"` // bytes (cột "buff/cache" của `free -b`)
+	MemUsedPercent     float64         `json:"mem_used_percent"`
+	MemTotalFormatted  string          `json:"mem_total_formatted"` // 1024-based, giống htop (VD: "3.82 GiB")
+	MemUsedFormatted   string          `json:"mem_used_formatted"`
+	SwapTotal          uint64          `json:"swap_total"`
+	SwapUsed           uint64          `json:"swap_used"`
+	SwapPercent        float64         `json:"swap_percent"`
+	Partitions         []PartitionStat `json:"partitions"`
+	NetBytesSent       uint64          `json:"net_bytes_sent"`
+	NetBytesRecv       uint64          `json:"net_bytes_recv"`
+	NetUploadRate      float64         `json:"net_upload_rate"`
+	NetDownloadRate    float64         `json:"net_download_rate"`
+	TopProcesses       []ProcessInfo   `json:"top_processes"`
+	TopMemoryProcesses []ProcessInfo   `json:"top_memory_processes"`
 }
 
 // MetricSummary provides statistical aggregates (Min, Max, Avg) over a time period

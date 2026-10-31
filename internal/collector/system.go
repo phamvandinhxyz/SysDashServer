@@ -255,8 +255,10 @@ func (c *SystemCollector) Collect() models.RealtimeMetric {
 		c.lastNetCheck = now
 	}
 
-	// 5. Top 5 processes
-	metric.TopProcesses = c.GetProcesses("", "cpu", "desc", 5)
+	// 5. Top 5 processes (CPU & Memory)
+	allProcs := c.getAllProcesses("")
+	metric.TopProcesses = sortProcesses(allProcs, "cpu", "desc", 5)
+	metric.TopMemoryProcesses = sortProcesses(allProcs, "memory", "desc", 5)
 
 	return metric
 }
@@ -545,8 +547,8 @@ func (c *SystemCollector) Diagnostics() map[string]interface{} {
 	return result
 }
 
-// GetProcesses returns filtered, sorted and paginated process list with raw CPU percent (Irix mode)
-func (c *SystemCollector) GetProcesses(search, sortBy, order string, limit int) []models.ProcessInfo {
+// getAllProcesses fetches and parses all processes once
+func (c *SystemCollector) getAllProcesses(search string) []models.ProcessInfo {
 	procs, err := process.Processes()
 	if err != nil {
 		return nil
@@ -591,22 +593,29 @@ func (c *SystemCollector) GetProcesses(search, sortBy, order string, limit int) 
 			Status:        statusStr,
 		})
 	}
+	return list
+}
+
+// sortProcesses sorts and limits a list of processes
+func sortProcesses(list []models.ProcessInfo, sortBy, order string, limit int) []models.ProcessInfo {
+	res := make([]models.ProcessInfo, len(list))
+	copy(res, list)
 
 	isAsc := strings.ToLower(order) == "asc"
 
-	sort.Slice(list, func(i, j int) bool {
+	sort.Slice(res, func(i, j int) bool {
 		var less bool
 		switch strings.ToLower(sortBy) {
 		case "mem", "memory":
-			less = list[i].MemoryPercent < list[j].MemoryPercent
+			less = res[i].MemoryPercent < res[j].MemoryPercent
 		case "rss":
-			less = list[i].MemoryRSS < list[j].MemoryRSS
+			less = res[i].MemoryRSS < res[j].MemoryRSS
 		case "name":
-			less = strings.ToLower(list[i].Name) < strings.ToLower(list[j].Name)
+			less = strings.ToLower(res[i].Name) < strings.ToLower(res[j].Name)
 		case "pid":
-			less = list[i].PID < list[j].PID
+			less = res[i].PID < res[j].PID
 		default:
-			less = list[i].CPUPercent < list[j].CPUPercent
+			less = res[i].CPUPercent < res[j].CPUPercent
 		}
 		if isAsc {
 			return less
@@ -614,8 +623,14 @@ func (c *SystemCollector) GetProcesses(search, sortBy, order string, limit int) 
 		return !less
 	})
 
-	if limit > 0 && len(list) > limit {
-		list = list[:limit]
+	if limit > 0 && len(res) > limit {
+		res = res[:limit]
 	}
-	return list
+	return res
+}
+
+// GetProcesses returns filtered, sorted and paginated process list with raw CPU percent (Irix mode)
+func (c *SystemCollector) GetProcesses(search, sortBy, order string, limit int) []models.ProcessInfo {
+	list := c.getAllProcesses(search)
+	return sortProcesses(list, sortBy, order, limit)
 }

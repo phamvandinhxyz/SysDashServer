@@ -1,4 +1,4 @@
-﻿# 📖 SysDashServer — API Specification & Integration Guide
+# 📖 SysDashServer — API Specification & Integration Guide
 
 > **SysDashServer** là backend giám sát hệ thống thời gian thực (CPU, RAM, Disk, Network, Top Processes, Docker) viết bằng **Golang**, hỗ trợ cơ chế xác thực **JWT**, phân quyền **RBAC (Admin / Viewer)**, và **WebSocket Streaming**.
 
@@ -112,7 +112,8 @@ docker run -d \
 | `partitions[].total/used/free` | `df -B1 /` | `Size / Used / Avail`, `used_percent = Used/(Used+Avail)` |
 | `containers[].mem_usage` | `docker stats --no-stream` | `usage - inactive_file` (cgroup v2) / `usage - total_inactive_file` (v1) |
 | `containers[].cpu_percent` | Chuẩn hóa theo Host (0 - 100%) | `(cpu_delta / system_delta) * 100` (chuẩn hóa theo tổng tài nguyên CPU máy chủ, không nhân `onlineCPUs` như `docker stats` CLI để đồng bộ thang đo với Dashboard) |
-| `top_processes[].cpu_percent` | Chuẩn hóa theo Host (0 - 100%) | `cpu_process / cores` (chuẩn hóa theo toàn bộ công suất CPU máy chủ 0 - 100%, thay vì Irix mode của `top` để đồng bộ với % CPU tổng) |
+| `top_processes[].cpu_percent` | Chuẩn Irix mode (`htop`) | `p.CPUPercent()` nguyên bản từ `gopsutil` (1 core = 100%) |
+| `top_memory_processes[].memory_percent` | `htop` / `free` | Top 5 tiến trình ngốn RAM nhất (`RSS / MemTotal * 100`) |
 | `images[].size` | `docker images` | trường `Size` của Docker Engine API (đơn vị SI) |
 
 #### `GET /system/diagnostics` *(Admin Only)*
@@ -315,6 +316,24 @@ Lấy ảnh chụp số liệu phần cứng tức thời (chứa `host_info`, C
       "memory_rss": 87800000,
       "status": "running"
     }
+  ],
+  "top_memory_processes": [
+    {
+      "pid": 1698,
+      "name": "dockerd",
+      "cpu_percent": 0.40,
+      "memory_percent": 2.14,
+      "memory_rss": 87800000,
+      "status": "running"
+    },
+    {
+      "pid": 28224,
+      "name": "sysdash-server",
+      "cpu_percent": 0.85,
+      "memory_percent": 1.12,
+      "memory_rss": 45900000,
+      "status": "running"
+    }
   ]
 }
 ```
@@ -322,6 +341,8 @@ Lấy ảnh chụp số liệu phần cứng tức thời (chứa `host_info`, C
 ##### 📋 Bảng giải thích chi tiết các trường (`RealtimeMetric` & `PartitionStat`):
 | Trường JSON | Kiểu dữ liệu | Đơn vị | Ý nghĩa & Lệnh đối chiếu trên VPS |
 |---|---|---|---|
+| `top_processes` | list | - | Danh sách Top 5 tiến trình tiêu thụ CPU cao nhất (Irix mode) |
+| `top_memory_processes` | list | - | Danh sách Top 5 tiến trình tiêu thụ RAM cao nhất (giảm dần) |
 | `mem_total` | uint64 | bytes | Tổng RAM vật lý (`MemTotal` trong `free -b` / `/proc/meminfo`) |
 | `mem_used` | uint64 | bytes | RAM thực sự hệ thống & ứng dụng đang dùng (cột `used` của `free -b`, khớp thanh xanh của `htop`) |
 | `mem_free` | uint64 | bytes | RAM chưa phân bổ (`mem_total - mem_used`) |
@@ -426,6 +447,12 @@ Tìm kiếm, sắp xếp và phân trang các tiến trình hệ thống đang c
   | `sort` | string | `cpu` | Trường sắp xếp: `cpu`, `memory`, `rss`, `name`, `pid` |
   | `order` | string | `desc` | Thứ tự: `desc` (giảm dần), `asc` (tăng dần) |
   | `limit` | int | `10` | Số lượng tiến trình trả về (1 - 100) |
+
+> 💡 **Lấy Top 5 tiến trình ngốn RAM nhất:**
+> ```http
+> GET /api/v1/system/processes?sort=memory&order=desc&limit=5
+> ```
+> *(hoặc dùng `sort=rss` để sắp xếp theo số bytes RAM thực tế Resident Set Size)*
 
 - **Response `200 OK`**:
 ```json
@@ -605,6 +632,16 @@ Kết nối WebSocket để nhận dữ liệu đẩy về liên tục mỗi **2
   "net_upload_rate": 5500.0,
   "net_download_rate": 7500.0,
   "top_processes": [
+    {
+      "pid": 28224,
+      "name": "sysdash-server",
+      "cpu_percent": 0.85,
+      "memory_percent": 1.12,
+      "memory_rss": 45900000,
+      "status": "running"
+    }
+  ],
+  "top_memory_processes": [
     {
       "pid": 28224,
       "name": "sysdash-server",
@@ -895,6 +932,7 @@ export interface RealtimeMetric {
   net_upload_rate: number;
   net_download_rate: number;
   top_processes: ProcessInfo[];
+  top_memory_processes: ProcessInfo[];
 }
 
 // 5. Đăng nhập
@@ -995,7 +1033,8 @@ data class RealtimeMetric(
     val net_bytes_recv: Long,
     val net_upload_rate: Double,
     val net_download_rate: Double,
-    val top_processes: List<ProcessInfo>
+    val top_processes: List<ProcessInfo>,
+    val top_memory_processes: List<ProcessInfo>
 )
 ```
 
