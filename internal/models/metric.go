@@ -56,7 +56,7 @@ type PartitionStat struct {
 type ProcessInfo struct {
 	PID           int32   `json:"pid"`
 	Name          string  `json:"name"`
-	CPUPercent    float64 `json:"cpu_percent"`    // Phần trăm CPU chuẩn hóa theo toàn bộ hệ thống (0 - 100%)
+	CPUPercent    float64 `json:"cpu_percent"`    // Phần trăm CPU nguyên bản từ gopsutil (Irix mode: 1 core = 100%)
 	MemoryPercent float32 `json:"memory_percent"` // Phần trăm RAM so với tổng RAM vật lý (%)
 	MemoryRSS     uint64  `json:"memory_rss"`     // Dung lượng RAM thực tế (Resident Set Size - bytes)
 	Status        string  `json:"status"`
