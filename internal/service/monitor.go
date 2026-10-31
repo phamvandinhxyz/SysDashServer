@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,6 +16,27 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+type ClientWSOptions struct {
+	Limit int    `json:"limit"`
+	Sort  string `json:"sort"`
+	Order string `json:"order"`
+}
+
+func normalizeWSOptions(opt ClientWSOptions) ClientWSOptions {
+	if opt.Limit <= 0 || opt.Limit > 100 {
+		opt.Limit = 5
+	}
+	opt.Sort = strings.ToLower(strings.TrimSpace(opt.Sort))
+	if opt.Sort == "" {
+		opt.Sort = "cpu"
+	}
+	opt.Order = strings.ToLower(strings.TrimSpace(opt.Order))
+	if opt.Order == "" {
+		opt.Order = "desc"
+	}
+	return opt
+}
+
 type MonitorService struct {
 	cfg          *config.Config
 	db           *database.DB
@@ -22,7 +44,7 @@ type MonitorService struct {
 	latestMetric models.RealtimeMetric
 
 	mu         sync.RWMutex
-	wsClients  map[*websocket.Conn]bool
+	wsClients  map[*websocket.Conn]ClientWSOptions
 	lastAlerts map[string]time.Time // Cooldown tracking per alert type
 }
 
@@ -31,7 +53,7 @@ func NewMonitorService(cfg *config.Config, db *database.DB, collector *collector
 		cfg:        cfg,
 		db:         db,
 		collector:  collector,
-		wsClients:  make(map[*websocket.Conn]bool),
+		wsClients:  make(map[*websocket.Conn]ClientWSOptions),
 		lastAlerts: make(map[string]time.Time),
 	}
 }
@@ -124,23 +146,94 @@ func (s *MonitorService) saveSnapshot(m models.RealtimeMetric) {
 	}
 }
 
-func (s *MonitorService) GetCurrentMetric() models.RealtimeMetric {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.latestMetric
+// filterMetricForClient returns a shallow copy of RealtimeMetric with TopProcesses sorted by requested (sortBy, order, limit)
+// and TopMemoryProcesses clamped or re-sorted to limit.
+func (s *MonitorService) filterMetricForClient(m models.RealtimeMetric, sortBy, order string, limit int) models.RealtimeMetric {
+	if limit <= 0 || limit > 100 {
+		limit = 5
+	}
+	sortBy = strings.ToLower(strings.TrimSpace(sortBy))
+	if sortBy == "" {
+		sortBy = "cpu"
+	}
+	order = strings.ToLower(strings.TrimSpace(order))
+	if order == "" {
+		order = "desc"
+	}
+
+	res := m
+	if procs := s.collector.GetCachedProcesses(sortBy, order, limit); len(procs) > 0 {
+		res.TopProcesses = procs
+	} else if len(res.TopProcesses) > limit {
+		res.TopProcesses = make([]models.ProcessInfo, limit)
+		copy(res.TopProcesses, m.TopProcesses[:limit])
+	}
+
+	if memProcs := s.collector.GetCachedProcesses("memory", "desc", limit); len(memProcs) > 0 {
+		res.TopMemoryProcesses = memProcs
+	} else if len(res.TopMemoryProcesses) > limit {
+		res.TopMemoryProcesses = make([]models.ProcessInfo, limit)
+		copy(res.TopMemoryProcesses, m.TopMemoryProcesses[:limit])
+	}
+
+	return res
 }
 
-func (s *MonitorService) AddWSClient(conn *websocket.Conn) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.wsClients[conn] = true
-	log.Printf("[WebSocket] Client connected. Total active clients: %d", len(s.wsClients))
+func (s *MonitorService) GetCurrentMetric(limit int, sortBy, order string) models.RealtimeMetric {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.filterMetricForClient(s.latestMetric, sortBy, order, limit)
+}
 
-	// Send current metric immediately on connect
-	msg, err := json.Marshal(s.latestMetric)
+func (s *MonitorService) AddWSClient(conn *websocket.Conn, opt ClientWSOptions) {
+	opt = normalizeWSOptions(opt)
+	s.mu.Lock()
+	s.wsClients[conn] = opt
+	m := s.filterMetricForClient(s.latestMetric, opt.Sort, opt.Order, opt.Limit)
+	totalClients := len(s.wsClients)
+	s.mu.Unlock()
+
+	log.Printf("[WebSocket] Client connected (limit: %d, sort: %s, order: %s). Total active clients: %d", opt.Limit, opt.Sort, opt.Order, totalClients)
+
+	// Send current metric snapshot immediately on connect
+	msg, err := json.Marshal(m)
 	if err == nil {
+		conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		_ = conn.WriteMessage(websocket.TextMessage, msg)
 	}
+}
+
+func (s *MonitorService) UpdateWSClientOptions(conn *websocket.Conn, limit int, sort, order string) {
+	s.mu.Lock()
+	opt, exists := s.wsClients[conn]
+	if !exists {
+		s.mu.Unlock()
+		return
+	}
+	if limit > 0 && limit <= 100 {
+		opt.Limit = limit
+	}
+	if sort != "" {
+		opt.Sort = sort
+	}
+	if order != "" {
+		opt.Order = order
+	}
+	opt = normalizeWSOptions(opt)
+	s.wsClients[conn] = opt
+	m := s.filterMetricForClient(s.latestMetric, opt.Sort, opt.Order, opt.Limit)
+	s.mu.Unlock()
+
+	// Send immediate snapshot with newly requested options
+	msg, err := json.Marshal(m)
+	if err == nil {
+		conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		_ = conn.WriteMessage(websocket.TextMessage, msg)
+	}
+}
+
+func (s *MonitorService) SetWSClientLimit(conn *websocket.Conn, limit int) {
+	s.UpdateWSClientOptions(conn, limit, "", "")
 }
 
 func (s *MonitorService) RemoveWSClient(conn *websocket.Conn) {
@@ -158,22 +251,34 @@ func (s *MonitorService) broadcastMetrics(metric models.RealtimeMetric) {
 		return
 	}
 
-	payload, err := json.Marshal(metric)
-	if err != nil {
-		s.mu.RUnlock()
-		return
+	type clientEntry struct {
+		conn *websocket.Conn
+		opt  ClientWSOptions
 	}
-
-	clients := make([]*websocket.Conn, 0, len(s.wsClients))
-	for client := range s.wsClients {
-		clients = append(clients, client)
+	clients := make([]clientEntry, 0, len(s.wsClients))
+	for client, opt := range s.wsClients {
+		clients = append(clients, clientEntry{conn: client, opt: opt})
 	}
 	s.mu.RUnlock()
 
-	for _, client := range clients {
-		client.SetWriteDeadline(time.Now().Add(5 * time.Second))
-		if err := client.WriteMessage(websocket.TextMessage, payload); err != nil {
-			s.RemoveWSClient(client)
+	payloads := make(map[string][]byte)
+
+	for _, c := range clients {
+		cacheKey := fmt.Sprintf("%d-%s-%s", c.opt.Limit, c.opt.Sort, c.opt.Order)
+		payload, ok := payloads[cacheKey]
+		if !ok {
+			filtered := s.filterMetricForClient(metric, c.opt.Sort, c.opt.Order, c.opt.Limit)
+			data, err := json.Marshal(filtered)
+			if err != nil {
+				continue
+			}
+			payload = data
+			payloads[cacheKey] = payload
+		}
+
+		c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		if err := c.conn.WriteMessage(websocket.TextMessage, payload); err != nil {
+			s.RemoveWSClient(c.conn)
 		}
 	}
 }

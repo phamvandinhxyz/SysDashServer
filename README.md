@@ -247,6 +247,18 @@ Lấy thông tin cấu hình phần cứng tĩnh (Tên chip CPU, Số nhân vậ
 Lấy ảnh chụp số liệu phần cứng tức thời (chứa `host_info`, CPU %, % từng nhân, RAM, Swap, Đĩa cứng, Mạng, Top 5 Processes) với đầy đủ cả giá trị thô (**bytes**) và chuỗi định dạng sẵn (**1024-based formatted strings** khớp với `htop`, `free -h`, `df -h`).
 
 - **Headers**: `Authorization: Bearer <token>`
+- **Query Parameters**:
+  | Param | Kiểu | Mặc định | Mô tả |
+  |---|---|---|---|
+  | `limit` (hoặc `top_limit`) | int | `5` | Số lượng tiến trình trả về trong `top_processes` và `top_memory_processes` (1 - 100) |
+  | `sort` | string | `cpu` | Tiêu chí sắp xếp danh sách `top_processes`: `cpu`, `memory` (hoặc `mem`), `rss`, `name`, `pid` |
+  | `order` | string | `desc` | Thứ tự sắp xếp: `desc` (giảm dần - mặc định), `asc` (tăng dần) |
+
+> 💡 **Ví dụ gọi API với tham số sort, order, limit:**
+> ```http
+> GET /api/v1/metrics/current?sort=memory&order=desc&limit=15
+> ```
+
 - **Response `200 OK`**:
 ```json
 {
@@ -341,8 +353,8 @@ Lấy ảnh chụp số liệu phần cứng tức thời (chứa `host_info`, C
 ##### 📋 Bảng giải thích chi tiết các trường (`RealtimeMetric` & `PartitionStat`):
 | Trường JSON | Kiểu dữ liệu | Đơn vị | Ý nghĩa & Lệnh đối chiếu trên VPS |
 |---|---|---|---|
-| `top_processes` | list | - | Danh sách Top 5 tiến trình tiêu thụ CPU cao nhất (Irix mode) |
-| `top_memory_processes` | list | - | Danh sách Top 5 tiến trình tiêu thụ RAM cao nhất (giảm dần) |
+| `top_processes` | list | - | Danh sách Top tiến trình tiêu thụ CPU cao nhất (Irix mode, số lượng theo `limit`, mặc định Top 5) |
+| `top_memory_processes` | list | - | Danh sách Top tiến trình tiêu thụ RAM cao nhất (giảm dần, số lượng theo `limit`, mặc định Top 5) |
 | `mem_total` | uint64 | bytes | Tổng RAM vật lý (`MemTotal` trong `free -b` / `/proc/meminfo`) |
 | `mem_used` | uint64 | bytes | RAM thực sự hệ thống & ứng dụng đang dùng (cột `used` của `free -b`, khớp thanh xanh của `htop`) |
 | `mem_free` | uint64 | bytes | RAM chưa phân bổ (`mem_total - mem_used`) |
@@ -576,13 +588,22 @@ Lấy danh sách tất cả Containers (đang chạy hoặc đã dừng) kèm th
 
 ### ⚡ 4.6. Real-time Streaming (WebSocket)
 
-#### `WS /ws/metrics?token=<jwt>`
+#### `WS /ws/metrics?token=<jwt>&limit=<n>&sort=<sort>&order=<order>`
 Kết nối WebSocket để nhận dữ liệu đẩy về liên tục mỗi **2 giây**.
 
-- **URL**: `ws://<server-ip>:8095/api/v1/ws/metrics?token=<jwt>`
+- **URL**: `ws://<server-ip>:8095/api/v1/ws/metrics?token=<jwt>&limit=15&sort=cpu&order=desc`
+- **Query Parameters**:
+  | Param | Kiểu | Mặc định | Mô tả |
+  |---|---|---|---|
+  | `token` | string | - | **Bắt buộc**: JWT token xác thực |
+  | `limit` (hoặc `top_limit`) | int | `5` | Số lượng tiến trình trả về trong `top_processes` và `top_memory_processes` (1 - 100) |
+  | `sort` | string | `cpu` | Tiêu chí sắp xếp danh sách `top_processes`: `cpu`, `memory` (hoặc `mem`), `rss`, `name`, `pid` |
+  | `order` | string | `desc` | Thứ tự sắp xếp: `desc` (giảm dần - mặc định), `asc` (tăng dần) |
+
 - **Cơ chế**:
-  - Gửi dữ liệu snapshot ngay khi vừa bắt tay (handshake) thành công.
-  - Tự động đẩy payload `RealtimeMetric` mỗi 2 giây.
+  - Gửi dữ liệu snapshot ngay khi vừa bắt tay (handshake) thành công theo đúng các tùy chọn `limit`, `sort`, `order` trên query string.
+  - Tự động đẩy payload `RealtimeMetric` mỗi 2 giây theo đúng các tùy chọn của client.
+  - **Thay đổi tùy chọn động**: Client có thể gửi message JSON `{"limit": 20, "sort": "memory", "order": "desc"}` trực tiếp qua kết nối WebSocket đang mở để đổi cấu hình tức thì mà không cần ngắt kết nối lại.
 - **Message Payload nhận được (JSON)**:
 ```json
 {

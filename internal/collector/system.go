@@ -33,6 +33,7 @@ type SystemCollector struct {
 	lastCPUTotal  float64
 	lastCPUBusy   float64
 	lastCoreTimes []cpu.TimesStat
+	lastProcesses []models.ProcessInfo
 }
 
 func NewSystemCollector() *SystemCollector {
@@ -255,12 +256,25 @@ func (c *SystemCollector) Collect() models.RealtimeMetric {
 		c.lastNetCheck = now
 	}
 
-	// 5. Top 5 processes (CPU & Memory)
+	// 5. Processes snapshot
 	allProcs := c.getAllProcesses("")
-	metric.TopProcesses = sortProcesses(allProcs, "cpu", "desc", 5)
-	metric.TopMemoryProcesses = sortProcesses(allProcs, "memory", "desc", 5)
+	c.lastProcesses = allProcs
+	metric.TopProcesses = sortProcesses(allProcs, "cpu", "desc", 100)
+	metric.TopMemoryProcesses = sortProcesses(allProcs, "memory", "desc", 100)
 
 	return metric
+}
+
+// GetCachedProcesses returns sorted processes from the latest cached snapshot without re-scanning /proc
+func (c *SystemCollector) GetCachedProcesses(sortBy, order string, limit int) []models.ProcessInfo {
+	c.mu.Lock()
+	procs := c.lastProcesses
+	c.mu.Unlock()
+
+	if len(procs) == 0 {
+		return nil
+	}
+	return sortProcesses(procs, sortBy, order, limit)
 }
 
 func clampPct(p float64) float64 {

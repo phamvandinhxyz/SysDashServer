@@ -1,4 +1,4 @@
-﻿package handlers
+package handlers
 
 import (
 	"math"
@@ -29,9 +29,22 @@ func NewMetricsHandler(db *database.DB, monitor *service.MonitorService, collect
 	}
 }
 
-// GetCurrent returns the latest real-time system metrics snapshot
+// GetCurrent returns the latest real-time system metrics snapshot (with optional limit, sort, order for top processes)
 func (h *MetricsHandler) GetCurrent(c *gin.Context) {
-	metric := h.monitor.GetCurrentMetric()
+	limit := 5
+	limitStr := c.Query("limit")
+	if limitStr == "" {
+		limitStr = c.Query("top_limit")
+	}
+	if limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 && l <= 100 {
+			limit = l
+		}
+	}
+	sort := c.DefaultQuery("sort", "cpu")
+	order := c.DefaultQuery("order", "desc")
+
+	metric := h.monitor.GetCurrentMetric(limit, sort, order)
 	c.JSON(http.StatusOK, metric)
 }
 
