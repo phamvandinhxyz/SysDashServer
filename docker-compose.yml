@@ -19,7 +19,7 @@ services:
       # Mount ổ đĩa thật của VPS để đo dung lượng Disk (thay vì ổ ảo container)
       - /:/host:ro
       # Lưu file database SQLite trên host để không bị mất dữ liệu
-      - ./sysdash.db:/app/sysdash.db
+      - ./data:/app/data
     environment:
       - TZ=Asia/Ho_Chi_Minh
       # Khai báo đường dẫn proc/sys/root để gopsutil đọc tài nguyên từ máy chủ VPS
